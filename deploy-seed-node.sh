@@ -154,7 +154,10 @@ else
 fi
 
 log "Building TreasureChest (pirated/pirate-cli) - this takes a while"
-as_user "cd '$TREASURECHEST_DIR' && ./zcutil/build.sh -j$MAKE_JOBS"
+# A seed node has no use for the pirate-gtest binary, and building it here
+# is fragile: zcutil/build.sh's own --disable-tests flag doesn't actually
+# disable tests (it sets --enable-tests=yes), so skip it via configure directly.
+as_user "cd '$TREASURECHEST_DIR' && CONFIGURE_FLAGS='--enable-tests=no' ./zcutil/build.sh -j$MAKE_JOBS"
 as_user "cd '$TREASURECHEST_DIR' && ./zcutil/fetch-params.sh"
 
 log "Cloning/updating lightwalletd ($LWD_BRANCH)"
