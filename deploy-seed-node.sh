@@ -12,18 +12,27 @@
 #
 # Layout (all under INSTALL_DIR, owned by the invoking user - no sudo needed
 # to run, update, or restart anything after this script finishes):
-#   build/   source checkouts + compiled artifacts (TreasureChest, lightwalletd,
-#            bitcore-node-pirate). Pull + rebuild here to update.
-#   bin/     stable symlinks (pirated, pirate-cli, lightwalletd) that config
-#            files and pm2 point at, so updating build/ doesn't require
-#            touching config.
-#   data/    PIRATE.conf, chain data, lightwalletd cache - the only directory
-#            that needs to persist/be backed up.
+#   build/         TreasureChest and lightwalletd source checkouts + compiled
+#                  artifacts. Pull + rebuild here to update.
+#   bin/           stable symlinks (pirated, pirate-cli, lightwalletd) that
+#                  config files and pm2 point at, so updating build/ doesn't
+#                  require touching config.
+#   bitcore-node/  the `bitcore-node create` scaffold: bitcore-node.json,
+#                  package.json, and node_modules (bitcore-node-pirate,
+#                  bitcore-lib-pirate, insight-api-pirate, insight-ui-pirate,
+#                  all pulled via git with `bitcore-node install`).
+#   data/          PIRATE.conf, chain data, lightwalletd cache - the only
+#                  directory that needs to persist/be backed up.
+#
+# bitcore-node-pirate itself is installed globally via npm from git (not
+# cloned/built), matching how its own CLI is meant to be used: `npm install
+# -g` gets you the `bitcore-node` command, then `bitcore-node create` scaffolds
+# the actual instance directory.
 #
 # Overridable via environment variables:
 #   INSTALL_DIR      Base directory for everything this script builds (default: ~<user>/pirateseednode)
 #   NODE_VERSION     Node.js version installed via nvm (default: 24.19.0)
-#   PIRATE_BRANCH    Branch to check out for TreasureChest/bitcore-node-pirate/bitcore-lib-pirate (default: dev-ironwood)
+#   PIRATE_BRANCH    Branch for TreasureChest and the bitcore-node-pirate/bitcore-lib-pirate/insight-api-pirate/insight-ui-pirate npm installs (default: dev-ironwood)
 #   LWD_BRANCH       Branch to check out for lightwalletd (default: dev)
 #   MAKE_JOBS        Parallelism for TreasureChest's build (default: nproc)
 #   NETWORK          livenet | testnet (default: livenet)
@@ -69,16 +78,16 @@ BUILD_DIR="$INSTALL_DIR/build"
 BIN_DIR="$INSTALL_DIR/bin"
 DATA_DIR="$INSTALL_DIR/data"
 CONFIG_DIR="$INSTALL_DIR/config"
+BITCORE_NODE_DIR="$INSTALL_DIR/bitcore-node"
 
 TREASURECHEST_DIR="$BUILD_DIR/TreasureChest"
 LWD_BUILD_DIR="$BUILD_DIR/lightwalletd"
-BITCORE_DIR="$BUILD_DIR/bitcore-node-pirate"
 
 PIRATED_DATA_DIR="$DATA_DIR/pirated"
 LWD_DATA_DIR="$DATA_DIR/lightwalletd"
 PIRATE_CONF="$PIRATED_DATA_DIR/PIRATE.conf"
 
-BITCORE_NODE_JSON="$CONFIG_DIR/bitcore-node.json"
+BITCORE_NODE_JSON="$BITCORE_NODE_DIR/bitcore-node.json"
 ECOSYSTEM_FILE="$CONFIG_DIR/ecosystem.config.js"
 
 log() { echo -e "\n==> $*"; }
@@ -127,6 +136,8 @@ fi
 
 log "Creating $INSTALL_DIR layout (owned by $TARGET_USER, no sudo needed to run or update)"
 as_user "mkdir -p '$BUILD_DIR' '$BIN_DIR' '$CONFIG_DIR' '$PIRATED_DATA_DIR' '$LWD_DATA_DIR'"
+# $BITCORE_NODE_DIR is intentionally not created here - `bitcore-node create`
+# below refuses to run if its target directory already exists.
 
 log "Installing nvm and Node.js $NODE_VERSION for $TARGET_USER"
 if [[ ! -s "$TARGET_HOME/.nvm/nvm.sh" ]]; then
@@ -175,17 +186,10 @@ as_user "ln -sf '$TREASURECHEST_DIR/src/pirated' '$BIN_DIR/pirated'"
 as_user "ln -sf '$TREASURECHEST_DIR/src/pirate-cli' '$BIN_DIR/pirate-cli'"
 as_user "ln -sf '$LWD_BUILD_DIR/lightwalletd' '$BIN_DIR/lightwalletd'"
 
-log "Cloning/updating bitcore-node-pirate ($PIRATE_BRANCH)"
-if [[ -d "$BITCORE_DIR/.git" ]]; then
-  as_user "git -C '$BITCORE_DIR' fetch origin '$PIRATE_BRANCH' && git -C '$BITCORE_DIR' checkout '$PIRATE_BRANCH' && git -C '$BITCORE_DIR' pull origin '$PIRATE_BRANCH'"
-else
-  as_user "git clone --branch '$PIRATE_BRANCH' https://github.com/piratenetwork/bitcore-node-pirate.git '$BITCORE_DIR'"
-fi
+log "Installing bitcore-node-pirate globally via npm ($PIRATE_BRANCH)"
+as_user "$NVM_LOAD; npm install -g 'git+https://github.com/piratenetwork/bitcore-node-pirate.git#$PIRATE_BRANCH'"
 
-log "Installing bitcore-node-pirate dependencies (npm install; pulls bitcore-lib-pirate)"
-as_user "$NVM_LOAD; cd '$BITCORE_DIR' && npm install"
-
-log "Configuring pirated (PIRATE.conf) and bitcore-node.json"
+log "Configuring pirated (PIRATE.conf)"
 if [[ ! -f "$PIRATE_CONF" ]]; then
   RPC_USER="pirate_$(openssl rand -hex 6)"
   RPC_PASSWORD=$(openssl rand -hex 24)
@@ -214,21 +218,40 @@ else
   log "PIRATE.conf already exists, leaving credentials untouched"
 fi
 
-as_user "cat > '$BITCORE_NODE_JSON' <<EOF
-{
-  \"network\": \"$NETWORK\",
-  \"port\": $BITCORE_PORT,
-  \"services\": [\"bitcoind\", \"web\"],
-  \"servicesConfig\": {
-    \"bitcoind\": {
-      \"spawn\": {
-        \"datadir\": \"$PIRATED_DATA_DIR\",
-        \"exec\": \"$BIN_DIR/pirated\"
-      }
-    }
-  }
-}
-EOF"
+log "Scaffolding bitcore-node instance directory"
+if [[ ! -f "$BITCORE_NODE_JSON" ]]; then
+  CREATE_NETWORK_FLAG=""
+  [[ "$NETWORK" == "testnet" ]] && CREATE_NETWORK_FLAG="--testnet"
+  as_user "$NVM_LOAD; bitcore-node create -d '$PIRATED_DATA_DIR' $CREATE_NETWORK_FLAG '$BITCORE_NODE_DIR'"
+else
+  log "$BITCORE_NODE_JSON already exists, leaving it as-is"
+fi
+
+# `create` defaults port to 3001 and exec to a bin/pirated placeholder inside
+# its own node_modules install; point both at what this script actually built.
+as_user "$NVM_LOAD; node -e \"
+  const fs = require('fs');
+  const p = '$BITCORE_NODE_JSON';
+  const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+  c.port = $BITCORE_PORT;
+  c.servicesConfig.bitcoind.spawn.datadir = '$PIRATED_DATA_DIR';
+  c.servicesConfig.bitcoind.spawn.exec = '$BIN_DIR/pirated';
+  fs.writeFileSync(p, JSON.stringify(c, null, 2));
+\""
+
+log "Installing insight-api/insight-ui services ($PIRATE_BRANCH)"
+if [[ ! -d "$BITCORE_NODE_DIR/node_modules/insight-api-pirate" ]]; then
+  as_user "$NVM_LOAD; cd '$BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-api-pirate.git#$PIRATE_BRANCH'"
+else
+  log "insight-api-pirate already installed, skipping"
+fi
+if [[ ! -d "$BITCORE_NODE_DIR/node_modules/insight-ui-pirate" ]]; then
+  as_user "$NVM_LOAD; cd '$BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-ui-pirate.git#$PIRATE_BRANCH'"
+else
+  log "insight-ui-pirate already installed, skipping"
+fi
+
+BITCORE_NODE_BIN=$(as_user "$NVM_LOAD; command -v bitcore-node")
 
 log "Writing pm2 ecosystem file"
 LWD_ARGS="--grpc-bind-addr $LWD_GRPC_BIND --http-bind-addr $LWD_HTTP_BIND --pirate-conf-path $PIRATE_CONF --data-dir $LWD_DATA_DIR"
@@ -243,9 +266,9 @@ module.exports = {
   apps: [
     {
       name: 'bitcore',
-      cwd: '$BITCORE_DIR',
-      script: './bin/bitcore-node',
-      args: 'start --config $BITCORE_NODE_JSON',
+      cwd: '$BITCORE_NODE_DIR',
+      script: '$BITCORE_NODE_BIN',
+      args: 'start --config $BITCORE_NODE_DIR',
       interpreter: 'node',
       autorestart: true,
       max_restarts: 30,
@@ -294,14 +317,18 @@ cat <<SUMMARY
 
 ==> Deploy complete.
 
-  pirated + bitcore-node : pm2 process "bitcore"      (RPC on 127.0.0.1:$RPC_PORT, web API on :$BITCORE_PORT)
+  pirated + bitcore-node : pm2 process "bitcore"      (RPC on 127.0.0.1:$RPC_PORT, web API + Insight on :$BITCORE_PORT)
   lightwalletd           : pm2 process "lightwalletd" (gRPC on $LWD_GRPC_BIND, HTTP on $LWD_HTTP_BIND)
 
+  Insight UI:  http://<host>:$BITCORE_PORT/
+  Insight API: http://<host>:$BITCORE_PORT/insight-api-pirate/
+
   Layout (all owned by $TARGET_USER, no sudo needed for day-to-day use):
-    $BUILD_DIR   source checkouts + compiled binaries - pull/rebuild here to update
-    $BIN_DIR     stable symlinks that config/pm2 point at
-    $DATA_DIR    chain data, PIRATE.conf, lightwalletd cache - back this up
-    $CONFIG_DIR  bitcore-node.json + pm2 ecosystem.config.js
+    $BUILD_DIR        TreasureChest/lightwalletd source + compiled binaries - pull/rebuild here to update
+    $BIN_DIR          stable symlinks that config/pm2 point at
+    $BITCORE_NODE_DIR bitcore-node.json + node_modules (bitcore-node-pirate, insight-api-pirate, insight-ui-pirate)
+    $DATA_DIR         chain data, PIRATE.conf, lightwalletd cache - back this up
+    $CONFIG_DIR       pm2 ecosystem.config.js
 
   RPC credentials: $PIRATE_CONF (generated on first run, not printed here)
 
@@ -313,6 +340,12 @@ cat <<SUMMARY
   To update pirated/lightwalletd: pull + rebuild in $BUILD_DIR, then
   'pm2 restart bitcore lightwalletd' (the $BIN_DIR symlinks pick up the new
   binaries automatically - no config changes needed).
+
+  To update bitcore-node-pirate itself: re-run 'npm install -g
+  git+https://github.com/piratenetwork/bitcore-node-pirate.git#$PIRATE_BRANCH'
+  then 'pm2 restart bitcore'. To update insight-api-pirate/insight-ui-pirate,
+  re-run the same 'bitcore-node install git+...#$PIRATE_BRANCH' command for
+  each from within $BITCORE_NODE_DIR, then 'pm2 restart bitcore'.
 
   NOTE: lightwalletd is running with a self-signed cert (--gen-cert-very-insecure)
   unless TLS_CERT/TLS_KEY were supplied. Put a real cert (e.g. via nginx + certbot)
