@@ -37,7 +37,18 @@
 #   LWD_BRANCH       Branch to check out for lightwalletd (default: dev)
 #   MAKE_JOBS        Parallelism for TreasureChest's build (default: nproc)
 #   NETWORK          livenet | testnet (default: livenet)
-#   RPC_PORT         pirated RPC port (default: 45453)
+#   P2P_PORT         pirated's actual P2P port to open in the firewall (default:
+#                     45452, mainnet). Pirate is built on Komodo's asset-chain
+#                     framework, which derives the real P2P port (and the wire
+#                     magic bytes) from a hash of fixed chain parameters at
+#                     startup - NOT the commonly-quoted 7770 from chainparams.cpp's
+#                     static defaults, which is dead code for this build. pirated
+#                     logs the actual value once on startup (grep its own log for
+#                     ">>>>>>>>>>"); confirmed 45452 on mainnet 2026-08-10, but
+#                     testnet's value is unverified - override this if NETWORK=testnet.
+#   RPC_PORT         pirated RPC port (default: 45453) - unaffected by the above,
+#                     since this is explicitly set via PIRATE.conf's rpcport=
+#                     rather than left to the same asset-chain auto-derivation.
 #   ZMQ_PORT         pirated zmqpub port, shared by rawtx/hashblock (default: 28332)
 #   BITCORE_PORT     bitcore-node web API port (default: 3001)
 #   LWD_GRPC_BIND    lightwalletd gRPC bind address (default: 0.0.0.0:9067)
@@ -111,6 +122,7 @@ PIRATE_BRANCH="${PIRATE_BRANCH:-dev-ironwood}"
 LWD_BRANCH="${LWD_BRANCH:-dev}"
 MAKE_JOBS="${MAKE_JOBS:-$(nproc)}"
 NETWORK="${NETWORK:-livenet}"
+P2P_PORT="${P2P_PORT:-45452}"
 RPC_PORT="${RPC_PORT:-45453}"
 ZMQ_PORT="${ZMQ_PORT:-28332}"
 BITCORE_PORT="${BITCORE_PORT:-3001}"
@@ -239,7 +251,7 @@ as_user "mkdir -p '$BUILD_DIR' '$BIN_DIR' '$CONFIG_DIR' '$PIRATED_DATA_DIR' '$LW
 # $BITCORE_NODE_DIR is intentionally not created here - `bitcore-node create`
 # below refuses to run if its target directory already exists.
 
-open_firewall_port 7770/tcp
+open_firewall_port "$P2P_PORT/tcp"
 
 if [[ -n "$DNSSEED_HOST" ]]; then
   open_firewall_port "$DNSSEED_PORT/udp"
@@ -679,6 +691,6 @@ $DNSSEED_INFO
   re-run the same 'bitcore-node install git+...#$PIRATE_BRANCH' command for
   each from within $BITCORE_NODE_DIR, then 'pm2 restart bitcore'.
 
-  Port 7770/tcp (mainnet P2P) was opened in ufw if it's active; open it
-  manually otherwise so this node can serve as a peer.
+  Port $P2P_PORT/tcp (P2P) was opened in ufw if it's active; open it manually
+  otherwise so this node can serve as a peer.
 SUMMARY
