@@ -41,12 +41,33 @@
 #   BITCORE_PORT     bitcore-node web API port (default: 3001)
 #   LWD_GRPC_BIND    lightwalletd gRPC bind address (default: 0.0.0.0:9067)
 #   LWD_HTTP_BIND    lightwalletd HTTP bind address (default: 0.0.0.0:9068)
-#   TLS_CERT/TLS_KEY Real TLS cert/key for lightwalletd; if unset a self-signed
-#                     cert is generated on every start (fine for bring-up/testing,
-#                     NOT for production - see README section on Let's Encrypt + nginx)
+#   DOMAIN_NAME      Hostname for the Insight UI/API (bitcore-node's web
+#                     service). Setting this enables nginx + a real Let's
+#                     Encrypt cert - see the "nginx + real TLS" section below.
+#                     Requires DNS for this hostname already pointed at this
+#                     VPS and port 80/443 reachable. Leave unset to skip nginx
+#                     entirely (lightwalletd falls back to a self-signed cert).
+#   LWD_DOMAIN_NAME  Hostname for lightwalletd's gRPC service, on its own
+#                     nginx server block. Required together with DOMAIN_NAME
+#                     (separate DNS record, same VPS).
+#   CERTBOT_EMAIL    Required if DOMAIN_NAME is set - contact address Let's
+#                     Encrypt uses for renewal-failure notices.
+#   TLS_CERT/TLS_KEY Real TLS cert/key for lightwalletd, used only when
+#                     DOMAIN_NAME is unset; if neither is set a self-signed
+#                     cert is generated on every start (fine for bring-up/
+#                     testing, not for a publicly reachable node).
 #   SWAP_FILE        Swapfile path (default: /swapfile)
 #   SWAP_SIZE_GB     Swapfile size in GiB (default: 4, or 8 if RAM < 4GiB)
 #   SKIP_SWAP        Set to 1 to skip swap provisioning entirely
+#
+# nginx + real TLS (when DOMAIN_NAME/LWD_DOMAIN_NAME are set):
+#   lightwalletd and bitcore-node's web service bind to 127.0.0.1 only
+#   (bitcore-node's web service can't be told to bind a specific host, so a
+#   ufw rule blocks external access to it instead, when ufw is already active).
+#   nginx gets one certbot cert covering both hostnames (one SAN cert, one
+#   renewal entry) and terminates TLS on :443 with two separate server
+#   blocks: DOMAIN_NAME proxies to bitcore-node's web port (Insight UI +
+#   insight-api-pirate), LWD_DOMAIN_NAME grpc_passes to lightwalletd.
 
 set -euo pipefail
 
@@ -67,12 +88,31 @@ NETWORK="${NETWORK:-livenet}"
 RPC_PORT="${RPC_PORT:-45453}"
 ZMQ_PORT="${ZMQ_PORT:-28332}"
 BITCORE_PORT="${BITCORE_PORT:-3001}"
-LWD_GRPC_BIND="${LWD_GRPC_BIND:-0.0.0.0:9067}"
-LWD_HTTP_BIND="${LWD_HTTP_BIND:-0.0.0.0:9068}"
+DOMAIN_NAME="${DOMAIN_NAME:-}"
+LWD_DOMAIN_NAME="${LWD_DOMAIN_NAME:-}"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+if [[ -n "$DOMAIN_NAME" ]]; then
+  LWD_GRPC_BIND="${LWD_GRPC_BIND:-127.0.0.1:9067}"
+  LWD_HTTP_BIND="${LWD_HTTP_BIND:-127.0.0.1:9068}"
+else
+  LWD_GRPC_BIND="${LWD_GRPC_BIND:-0.0.0.0:9067}"
+  LWD_HTTP_BIND="${LWD_HTTP_BIND:-0.0.0.0:9068}"
+fi
 TLS_CERT="${TLS_CERT:-}"
 TLS_KEY="${TLS_KEY:-}"
 SWAP_FILE="${SWAP_FILE:-/swapfile}"
 SKIP_SWAP="${SKIP_SWAP:-0}"
+
+if [[ -n "$DOMAIN_NAME" || -n "$LWD_DOMAIN_NAME" ]]; then
+  if [[ -z "$DOMAIN_NAME" || -z "$LWD_DOMAIN_NAME" ]]; then
+    echo "DOMAIN_NAME and LWD_DOMAIN_NAME must both be set to enable nginx (one subdomain for Insight, one for lightwalletd)." >&2
+    exit 1
+  fi
+  if [[ -z "$CERTBOT_EMAIL" ]]; then
+    echo "DOMAIN_NAME/LWD_DOMAIN_NAME are set but CERTBOT_EMAIL is not. Set CERTBOT_EMAIL so Let's Encrypt can reach you about renewal problems." >&2
+    exit 1
+  fi
+fi
 
 BUILD_DIR="$INSTALL_DIR/build"
 BIN_DIR="$INSTALL_DIR/bin"
@@ -101,6 +141,18 @@ apt-get install -y \
   libncurses-dev unzip git python3 python3-zmq zlib1g-dev wget \
   libcurl4-gnutls-dev bsdmainutils curl libsodium-dev bison liblz4-dev zip \
   golang-go jq openssl
+
+if [[ -n "$DOMAIN_NAME" ]]; then
+  apt-get install -y nginx certbot python3-certbot-nginx
+fi
+
+# Only ever tightens an ALREADY-active ufw (never enables it - flipping a
+# firewall on for the first time over SSH risks locking the caller out).
+open_firewall_port() {
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    ufw allow "$1" >/dev/null
+  fi
+}
 
 if [[ "$SKIP_SWAP" != "1" ]]; then
   EXISTING_SWAP_KB=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
@@ -138,6 +190,110 @@ log "Creating $INSTALL_DIR layout (owned by $TARGET_USER, no sudo needed to run 
 as_user "mkdir -p '$BUILD_DIR' '$BIN_DIR' '$CONFIG_DIR' '$PIRATED_DATA_DIR' '$LWD_DATA_DIR'"
 # $BITCORE_NODE_DIR is intentionally not created here - `bitcore-node create`
 # below refuses to run if its target directory already exists.
+
+open_firewall_port 7770/tcp
+
+if [[ -n "$DOMAIN_NAME" ]]; then
+  open_firewall_port 80/tcp
+  open_firewall_port 443/tcp
+  # bitcore-node's web service always binds all interfaces (no host option),
+  # so it can't be restricted to loopback like lightwalletd - block it at the
+  # firewall instead. lightwalletd's own ports already default to loopback
+  # above when DOMAIN_NAME is set, but deny them too as defense in depth.
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    ufw deny "$BITCORE_PORT/tcp" >/dev/null
+    ufw deny "${LWD_GRPC_BIND##*:}/tcp" >/dev/null
+    ufw deny "${LWD_HTTP_BIND##*:}/tcp" >/dev/null
+  fi
+
+  WEBROOT_DIR=/var/www/certbot
+  mkdir -p "$WEBROOT_DIR"
+  CERT_DIR="/etc/letsencrypt/live/$DOMAIN_NAME"
+  NGINX_SITE=/etc/nginx/sites-available/pirate-seed-node
+  LWD_GRPC_PORT="${LWD_GRPC_BIND##*:}"
+
+  log "Writing initial nginx config for $DOMAIN_NAME / $LWD_DOMAIN_NAME (HTTP only, for the ACME challenge)"
+  cat > "$NGINX_SITE" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN_NAME $LWD_DOMAIN_NAME;
+
+    location /.well-known/acme-challenge/ {
+        root $WEBROOT_DIR;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+EOF
+  ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/pirate-seed-node
+  rm -f /etc/nginx/sites-enabled/default
+  nginx -t
+  systemctl enable --now nginx >/dev/null 2>&1 || systemctl restart nginx
+
+  if [[ ! -f "$CERT_DIR/fullchain.pem" ]]; then
+    log "Obtaining Let's Encrypt certificate for $DOMAIN_NAME + $LWD_DOMAIN_NAME"
+    certbot certonly --webroot -w "$WEBROOT_DIR" -d "$DOMAIN_NAME" -d "$LWD_DOMAIN_NAME" \
+      --non-interactive --agree-tos -m "$CERTBOT_EMAIL"
+  else
+    log "Certificate covering $DOMAIN_NAME/$LWD_DOMAIN_NAME already exists, skipping issuance"
+  fi
+
+  log "Writing final nginx config (TLS termination + reverse proxy, two server blocks)"
+  cat > "$NGINX_SITE" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN_NAME $LWD_DOMAIN_NAME;
+
+    location /.well-known/acme-challenge/ {
+        root $WEBROOT_DIR;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+# Insight UI + insight-api-pirate, served by bitcore-node's web service
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $DOMAIN_NAME;
+
+    ssl_certificate     $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:$BITCORE_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+
+# lightwalletd's gRPC service
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $LWD_DOMAIN_NAME;
+
+    ssl_certificate     $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+
+    location / {
+        grpc_pass grpc://127.0.0.1:$LWD_GRPC_PORT;
+    }
+}
+EOF
+  nginx -t
+  systemctl reload nginx
+  # The certbot apt package installs its own renewal timer (certbot.timer);
+  # nothing further to schedule here.
+fi
 
 log "Installing nvm and Node.js $NODE_VERSION for $TARGET_USER"
 if [[ ! -s "$TARGET_HOME/.nvm/nvm.sh" ]]; then
@@ -255,7 +411,11 @@ BITCORE_NODE_BIN=$(as_user "$NVM_LOAD; command -v bitcore-node")
 
 log "Writing pm2 ecosystem file"
 LWD_ARGS="--grpc-bind-addr $LWD_GRPC_BIND --http-bind-addr $LWD_HTTP_BIND --pirate-conf-path $PIRATE_CONF --data-dir $LWD_DATA_DIR"
-if [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]]; then
+if [[ -n "$DOMAIN_NAME" ]]; then
+  # nginx terminates TLS and is the only thing that can reach these
+  # loopback-bound ports, so plaintext here is safe.
+  LWD_ARGS="$LWD_ARGS --no-tls-very-insecure"
+elif [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]]; then
   LWD_ARGS="$LWD_ARGS --tls-cert $TLS_CERT --tls-key $TLS_KEY"
 else
   LWD_ARGS="$LWD_ARGS --gen-cert-very-insecure"
@@ -313,6 +473,27 @@ if [[ -n "$STARTUP_CMD" ]]; then
   eval "$STARTUP_CMD"
 fi
 
+if [[ -n "$DOMAIN_NAME" ]]; then
+  ACCESS_INFO="  Insight UI:        https://$DOMAIN_NAME/
+  Insight API:       https://$DOMAIN_NAME/insight-api-pirate/
+  lightwalletd gRPC: $LWD_DOMAIN_NAME:443
+
+  TLS is terminated by nginx using one certbot cert covering both hostnames
+  (auto-renewed by the certbot.timer systemd unit). bitcore-node's web port
+  ($BITCORE_PORT) and lightwalletd ($LWD_GRPC_BIND, $LWD_HTTP_BIND) are not
+  meant to be reached directly - lightwalletd is loopback-bound and
+  bitcore-node's port is blocked at the firewall when ufw is active."
+else
+  ACCESS_INFO="  Insight UI:  http://<host>:$BITCORE_PORT/
+  Insight API: http://<host>:$BITCORE_PORT/insight-api-pirate/
+
+  NOTE: lightwalletd is running with a self-signed cert (--gen-cert-very-insecure)
+  unless TLS_CERT/TLS_KEY were supplied, and both it and bitcore-node's web
+  port are directly reachable with no TLS in front of them. Set DOMAIN_NAME,
+  LWD_DOMAIN_NAME, and CERTBOT_EMAIL and re-run this script to put nginx +
+  a real Let's Encrypt cert in front of both instead."
+fi
+
 cat <<SUMMARY
 
 ==> Deploy complete.
@@ -320,8 +501,7 @@ cat <<SUMMARY
   pirated + bitcore-node : pm2 process "bitcore"      (RPC on 127.0.0.1:$RPC_PORT, web API + Insight on :$BITCORE_PORT)
   lightwalletd           : pm2 process "lightwalletd" (gRPC on $LWD_GRPC_BIND, HTTP on $LWD_HTTP_BIND)
 
-  Insight UI:  http://<host>:$BITCORE_PORT/
-  Insight API: http://<host>:$BITCORE_PORT/insight-api-pirate/
+$ACCESS_INFO
 
   Layout (all owned by $TARGET_USER, no sudo needed for day-to-day use):
     $BUILD_DIR        TreasureChest/lightwalletd source + compiled binaries - pull/rebuild here to update
@@ -347,10 +527,6 @@ cat <<SUMMARY
   re-run the same 'bitcore-node install git+...#$PIRATE_BRANCH' command for
   each from within $BITCORE_NODE_DIR, then 'pm2 restart bitcore'.
 
-  NOTE: lightwalletd is running with a self-signed cert (--gen-cert-very-insecure)
-  unless TLS_CERT/TLS_KEY were supplied. Put a real cert (e.g. via nginx + certbot)
-  in front of it before exposing $LWD_GRPC_BIND / $LWD_HTTP_BIND publicly.
-
-  Open port 7770/tcp (mainnet P2P) in your firewall so this node can serve as a
-  peer, and 9067/9068 if lightwalletd should be reachable directly.
+  Port 7770/tcp (mainnet P2P) was opened in ufw if it's active; open it
+  manually otherwise so this node can serve as a peer.
 SUMMARY
