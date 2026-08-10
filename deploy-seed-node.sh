@@ -12,11 +12,12 @@
 #
 # Layout (all under INSTALL_DIR, owned by the invoking user - no sudo needed
 # to run, update, or restart anything after this script finishes):
-#   build/         TreasureChest and lightwalletd source checkouts + compiled
-#                  artifacts. Pull + rebuild here to update.
-#   bin/           stable symlinks (pirated, pirate-cli, lightwalletd) that
-#                  config files and pm2 point at, so updating build/ doesn't
-#                  require touching config.
+#   build/         TreasureChest, lightwalletd, and (if enabled) pirate-seeder
+#                  source checkouts + compiled artifacts. Pull + rebuild here
+#                  to update.
+#   bin/           stable symlinks (pirated, pirate-cli, lightwalletd,
+#                  pirate-seeder) that config files and pm2 point at, so
+#                  updating build/ doesn't require touching config.
 #   bitcore-node/  the `bitcore-node create` scaffold: bitcore-node.json,
 #                  package.json, and node_modules (bitcore-node-pirate,
 #                  bitcore-lib-pirate, insight-api-pirate, insight-ui-pirate,
@@ -59,6 +60,19 @@
 #   SWAP_FILE        Swapfile path (default: /swapfile)
 #   SWAP_SIZE_GB     Swapfile size in GiB (default: 4, or 8 if RAM < 4GiB)
 #   SKIP_SWAP        Set to 1 to skip swap provisioning entirely
+#   DNSSEED_HOST     Hostname wallets/nodes will query, e.g. dnsseed.example.com.
+#                     Setting this (together with DNSSEED_NS/DNSSEED_MBOX) builds
+#                     and runs pirate-seeder - see "DNS seeder" below. Requires
+#                     that hostname already delegated (NS record) to this VPS;
+#                     leave unset to skip the DNS seeder entirely.
+#   DNSSEED_NS       Nameserver hostname identifying this VPS, e.g.
+#                     ns-dnsseed.example.com. Required together with DNSSEED_HOST.
+#   DNSSEED_MBOX     Contact e-mail for SOA records, '@' replaced by '.'
+#                     (e.g. admin.example.com). Required together with DNSSEED_HOST.
+#   DNSSEED_PORT     UDP port for the DNS seeder (default: 53)
+#   DNSSEED_BRANCH   Branch to check out for pirate-seeder (default: main)
+#   DNSSEED_TOR_PROXY Optional ip:port of a SOCKS5 proxy (e.g. a separately-run
+#                     system Tor) so the seeder can also crawl Tor peers
 #
 # nginx + real TLS (when DOMAIN_NAME/LWD_DOMAIN_NAME are set):
 #   lightwalletd and bitcore-node's web service bind to 127.0.0.1 only
@@ -68,6 +82,18 @@
 #   renewal entry) and terminates TLS on :443 with two separate server
 #   blocks: DOMAIN_NAME proxies to bitcore-node's web port (Insight UI +
 #   insight-api-pirate), LWD_DOMAIN_NAME grpc_passes to lightwalletd.
+#
+# DNS seeder (when DNSSEED_HOST is set):
+#   pirate-seeder crawls the P2P network independently of pirated/bitcore and
+#   answers DNS queries for DNSSEED_HOST with currently-good peers. It needs
+#   to bind a privileged UDP port (53 by default) - rather than run it as
+#   root, this script grants the built binary CAP_NET_BIND_SERVICE via
+#   setcap, so pm2 can still run it as the same unprivileged user as
+#   everything else. It auto-discovers this node's own I2P SAM bridge from
+#   PIRATE.conf's -i2psam (not set by this script by default - I2P peers are
+#   simply skipped until it is), and can crawl Tor peers via DNSSEED_TOR_PROXY.
+#   The DNS delegation itself (an A + NS record at your DNS provider) has to
+#   be done by hand beforehand - see pirate-seeder/README.md.
 
 set -euo pipefail
 
@@ -102,6 +128,12 @@ TLS_CERT="${TLS_CERT:-}"
 TLS_KEY="${TLS_KEY:-}"
 SWAP_FILE="${SWAP_FILE:-/swapfile}"
 SKIP_SWAP="${SKIP_SWAP:-0}"
+DNSSEED_HOST="${DNSSEED_HOST:-}"
+DNSSEED_NS="${DNSSEED_NS:-}"
+DNSSEED_MBOX="${DNSSEED_MBOX:-}"
+DNSSEED_PORT="${DNSSEED_PORT:-53}"
+DNSSEED_BRANCH="${DNSSEED_BRANCH:-main}"
+DNSSEED_TOR_PROXY="${DNSSEED_TOR_PROXY:-}"
 
 if [[ -n "$DOMAIN_NAME" || -n "$LWD_DOMAIN_NAME" ]]; then
   if [[ -z "$DOMAIN_NAME" || -z "$LWD_DOMAIN_NAME" ]]; then
@@ -110,6 +142,13 @@ if [[ -n "$DOMAIN_NAME" || -n "$LWD_DOMAIN_NAME" ]]; then
   fi
   if [[ -z "$CERTBOT_EMAIL" ]]; then
     echo "DOMAIN_NAME/LWD_DOMAIN_NAME are set but CERTBOT_EMAIL is not. Set CERTBOT_EMAIL so Let's Encrypt can reach you about renewal problems." >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$DNSSEED_HOST" || -n "$DNSSEED_NS" || -n "$DNSSEED_MBOX" ]]; then
+  if [[ -z "$DNSSEED_HOST" || -z "$DNSSEED_NS" || -z "$DNSSEED_MBOX" ]]; then
+    echo "DNSSEED_HOST, DNSSEED_NS, and DNSSEED_MBOX must all be set together to run the DNS seeder." >&2
     exit 1
   fi
 fi
@@ -123,9 +162,11 @@ BITCORE_NODE_DIR="$INSTALL_DIR/bitcore-node"
 TREASURECHEST_DIR="$BUILD_DIR/TreasureChest"
 TREASURECHEST_ARTIFACTS_BIN="$TREASURECHEST_DIR/artifacts/bin"
 LWD_BUILD_DIR="$BUILD_DIR/lightwalletd"
+PIRATE_SEEDER_DIR="$BUILD_DIR/pirate-seeder"
 
 PIRATED_DATA_DIR="$DATA_DIR/pirated"
 LWD_DATA_DIR="$DATA_DIR/lightwalletd"
+PIRATE_SEEDER_DATA_DIR="$DATA_DIR/pirate-seeder"
 PIRATE_CONF="$PIRATED_DATA_DIR/PIRATE.conf"
 
 BITCORE_NODE_JSON="$BITCORE_NODE_DIR/bitcore-node.json"
@@ -145,6 +186,12 @@ apt-get install -y \
 
 if [[ -n "$DOMAIN_NAME" ]]; then
   apt-get install -y nginx certbot python3-certbot-nginx
+fi
+
+if [[ -n "$DNSSEED_HOST" ]]; then
+  # TreasureChest vendors its own OpenSSL via ./depends, but pirate-seeder
+  # links the system one directly, plus libevent for its crawler/DNS server.
+  apt-get install -y libssl-dev libevent-dev libcap2-bin
 fi
 
 # Only ever tightens an ALREADY-active ufw (never enables it - flipping a
@@ -193,6 +240,10 @@ as_user "mkdir -p '$BUILD_DIR' '$BIN_DIR' '$CONFIG_DIR' '$PIRATED_DATA_DIR' '$LW
 # below refuses to run if its target directory already exists.
 
 open_firewall_port 7770/tcp
+
+if [[ -n "$DNSSEED_HOST" ]]; then
+  open_firewall_port "$DNSSEED_PORT/udp"
+fi
 
 if [[ -n "$DOMAIN_NAME" ]]; then
   open_firewall_port 80/tcp
@@ -373,6 +424,30 @@ for extra_bin in pirate-networking pirate-tor pirate-i2pd pirate-tx wallet-utili
   fi
 done
 
+if [[ -n "$DNSSEED_HOST" ]]; then
+  log "Cloning/updating pirate-seeder ($DNSSEED_BRANCH)"
+  if [[ -d "$PIRATE_SEEDER_DIR/.git" ]]; then
+    as_user "git -C '$PIRATE_SEEDER_DIR' fetch origin '$DNSSEED_BRANCH' && git -C '$PIRATE_SEEDER_DIR' checkout '$DNSSEED_BRANCH' && git -C '$PIRATE_SEEDER_DIR' pull origin '$DNSSEED_BRANCH'"
+  else
+    as_user "git clone --branch '$DNSSEED_BRANCH' https://github.com/PirateNetwork/pirate-seeder.git '$PIRATE_SEEDER_DIR'"
+  fi
+
+  log "Building pirate-seeder"
+  as_user "cd '$PIRATE_SEEDER_DIR' && make -j$MAKE_JOBS"
+  as_user "ln -sf '$PIRATE_SEEDER_DIR/pirate-seeder' '$BIN_DIR/pirate-seeder'"
+  as_user "mkdir -p '$PIRATE_SEEDER_DATA_DIR'"
+
+  # Binding UDP/$DNSSEED_PORT (53 by default) needs CAP_NET_BIND_SERVICE.
+  # Grant it on the binary itself rather than running as root, consistent
+  # with everything else here running as $TARGET_USER under pm2. Capabilities
+  # live on the file's extended attributes and are lost every time the
+  # binary is rebuilt, so this has to be re-applied on every run of this
+  # script, not just the first.
+  if [[ "$DNSSEED_PORT" -lt 1024 ]]; then
+    setcap 'cap_net_bind_service=+ep' "$PIRATE_SEEDER_DIR/pirate-seeder"
+  fi
+fi
+
 log "Installing bitcore-node-pirate globally via npm ($PIRATE_BRANCH)"
 as_user "$NVM_LOAD; npm install -g 'git+https://github.com/piratenetwork/bitcore-node-pirate.git#$PIRATE_BRANCH'"
 
@@ -452,6 +527,23 @@ else
   LWD_ARGS="$LWD_ARGS --gen-cert-very-insecure"
 fi
 
+DNSSEED_APP_JS=""
+if [[ -n "$DNSSEED_HOST" ]]; then
+  DNSSEED_ARGS="-h $DNSSEED_HOST -n $DNSSEED_NS -m $DNSSEED_MBOX -p $DNSSEED_PORT --db $PIRATE_SEEDER_DATA_DIR/dnsseed.dat --pirate-conf $PIRATE_CONF"
+  [[ -n "$DNSSEED_TOR_PROXY" ]] && DNSSEED_ARGS="$DNSSEED_ARGS -o $DNSSEED_TOR_PROXY"
+  [[ "$NETWORK" == "testnet" ]] && DNSSEED_ARGS="$DNSSEED_ARGS --testnet"
+  DNSSEED_APP_JS=",
+    {
+      name: 'pirate-seeder',
+      cwd: '$PIRATE_SEEDER_DATA_DIR',
+      script: '$BIN_DIR/pirate-seeder',
+      args: '$DNSSEED_ARGS',
+      autorestart: true,
+      max_restarts: 30,
+      restart_delay: 5000
+    }"
+fi
+
 as_user "cat > '$ECOSYSTEM_FILE' <<EOF
 module.exports = {
   apps: [
@@ -473,7 +565,7 @@ module.exports = {
       autorestart: true,
       max_restarts: 30,
       restart_delay: 5000
-    }
+    }$DNSSEED_APP_JS
   ]
 };
 EOF"
@@ -496,6 +588,11 @@ fi
 
 log "Starting lightwalletd under pm2"
 as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only lightwalletd"
+
+if [[ -n "$DNSSEED_HOST" ]]; then
+  log "Starting pirate-seeder under pm2"
+  as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only pirate-seeder"
+fi
 
 log "Persisting pm2 process list and enabling pm2 on boot"
 as_user "$NVM_LOAD; pm2 save"
@@ -525,6 +622,25 @@ else
   a real Let's Encrypt cert in front of both instead."
 fi
 
+if [[ -n "$DNSSEED_HOST" ]]; then
+  DNSSEED_INFO="
+  pirate-seeder          : pm2 process \"pirate-seeder\" (UDP $DNSSEED_PORT)
+
+  DNS seed hostname: $DNSSEED_HOST (nameserver: $DNSSEED_NS)
+  This only works once your DNS provider has these two records pointed at
+  this VPS - see pirate-seeder/README.md if you haven't set them up yet:
+    A  $DNSSEED_NS  -> this VPS's public IP (must NOT be proxied/CDN'd)
+    NS $DNSSEED_HOST -> $DNSSEED_NS
+  Verify from another machine once those propagate:
+    dig NS $DNSSEED_HOST   (should show $DNSSEED_NS)
+    dig A  $DNSSEED_HOST   (should return live peer IPs)"
+else
+  DNSSEED_INFO="
+  DNS seeder: not running. Set DNSSEED_HOST, DNSSEED_NS, and DNSSEED_MBOX
+  and re-run this script to add one (needs its own DNS delegation - see
+  pirate-seeder/README.md)."
+fi
+
 cat <<SUMMARY
 
 ==> Deploy complete.
@@ -533,12 +649,13 @@ cat <<SUMMARY
   lightwalletd           : pm2 process "lightwalletd" (gRPC on $LWD_GRPC_BIND, HTTP on $LWD_HTTP_BIND)
 
 $ACCESS_INFO
+$DNSSEED_INFO
 
   Layout (all owned by $TARGET_USER, no sudo needed for day-to-day use):
-    $BUILD_DIR        TreasureChest/lightwalletd source + compiled binaries - pull/rebuild here to update
+    $BUILD_DIR        TreasureChest/lightwalletd/pirate-seeder source + compiled binaries - pull/rebuild here to update
     $BIN_DIR          stable symlinks that config/pm2 point at
     $BITCORE_NODE_DIR bitcore-node.json + node_modules (bitcore-node-pirate, insight-api-pirate, insight-ui-pirate)
-    $DATA_DIR         chain data, PIRATE.conf, lightwalletd cache - back this up
+    $DATA_DIR         chain data, PIRATE.conf, lightwalletd cache, dnsseed.dat - back this up
     $CONFIG_DIR       pm2 ecosystem.config.js
 
   RPC credentials: $PIRATE_CONF (generated on first run, not printed here)
@@ -547,10 +664,14 @@ $ACCESS_INFO
     pm2 status
     pm2 logs bitcore
     pm2 logs lightwalletd
+    pm2 logs pirate-seeder
 
-  To update pirated/lightwalletd: pull + rebuild in $BUILD_DIR, then
-  'pm2 restart bitcore lightwalletd' (the $BIN_DIR symlinks pick up the new
-  binaries automatically - no config changes needed).
+  To update pirated/lightwalletd/pirate-seeder: pull + rebuild in $BUILD_DIR,
+  then 'pm2 restart bitcore lightwalletd pirate-seeder' (the $BIN_DIR symlinks
+  pick up the new binaries automatically - no config changes needed). If
+  DNSSEED_PORT is below 1024, re-run this script instead of restarting
+  manually after rebuilding pirate-seeder - the CAP_NET_BIND_SERVICE grant is
+  lost every time the binary is replaced and this script is what re-applies it.
 
   To update bitcore-node-pirate itself: re-run 'npm install -g
   git+https://github.com/piratenetwork/bitcore-node-pirate.git#$PIRATE_BRANCH'
