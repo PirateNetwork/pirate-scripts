@@ -231,7 +231,15 @@ EOF
   ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/pirate-seed-node
   rm -f /etc/nginx/sites-enabled/default
   nginx -t
-  systemctl enable --now nginx >/dev/null 2>&1 || systemctl restart nginx
+  systemctl enable nginx >/dev/null 2>&1 || true
+  # `enable --now`/`start` are no-ops on an already-running nginx, which would
+  # silently leave the OLD config (e.g. the default site) loaded - reload if
+  # it's already up, start it only if it genuinely isn't.
+  if systemctl is-active --quiet nginx; then
+    systemctl reload nginx
+  else
+    systemctl start nginx
+  fi
 
   if [[ ! -f "$CERT_DIR/fullchain.pem" ]]; then
     log "Obtaining Let's Encrypt certificate for $DOMAIN_NAME + $LWD_DOMAIN_NAME"
