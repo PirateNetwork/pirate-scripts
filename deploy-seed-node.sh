@@ -121,6 +121,7 @@ CONFIG_DIR="$INSTALL_DIR/config"
 BITCORE_NODE_DIR="$INSTALL_DIR/bitcore-node"
 
 TREASURECHEST_DIR="$BUILD_DIR/TreasureChest"
+TREASURECHEST_ARTIFACTS_BIN="$TREASURECHEST_DIR/artifacts/bin"
 LWD_BUILD_DIR="$BUILD_DIR/lightwalletd"
 
 PIRATED_DATA_DIR="$DATA_DIR/pirated"
@@ -335,6 +336,19 @@ log "Building TreasureChest (pirated/pirate-cli) - this takes a while"
 as_user "cd '$TREASURECHEST_DIR' && CONFIGURE_FLAGS='--enable-tests=no' ./zcutil/build.sh -j$MAKE_JOBS"
 as_user "cd '$TREASURECHEST_DIR' && ./zcutil/fetch-params.sh"
 
+# `make install prefix=...` (rather than a bare `make install`, which would
+# default to /usr/local) stages every CLI binary into artifacts/bin/ - the
+# same layout zcutil/build-zip.sh and build-deb.sh already expect. This also
+# runs install-exec-hook (wired in automatically by automake as part of
+# `install`), which copies the depends-built tor/i2pd binaries in under their
+# pirate-* names and strips them (and pirate-networking) in place there;
+# pirated verifies each sibling's SHA256 against a hash baked in at build
+# time from that same stripped form, so skipping the strip would make it
+# refuse to start them. Silently a no-op for tor/i2pd if embedded onion
+# routing was configured off - only pirated/pirate-cli/etc. get installed.
+log "Installing TreasureChest binaries into $TREASURECHEST_ARTIFACTS_BIN"
+as_user "cd '$TREASURECHEST_DIR/src' && make install prefix='$TREASURECHEST_DIR/artifacts'"
+
 log "Cloning/updating lightwalletd ($LWD_BRANCH)"
 if [[ -d "$LWD_BUILD_DIR/.git" ]]; then
   as_user "git -C '$LWD_BUILD_DIR' fetch origin '$LWD_BRANCH' && git -C '$LWD_BUILD_DIR' checkout '$LWD_BRANCH' && git -C '$LWD_BUILD_DIR' pull origin '$LWD_BRANCH'"
@@ -346,9 +360,18 @@ log "Building lightwalletd"
 as_user "cd '$LWD_BUILD_DIR' && CGO_ENABLED=0 go build -a -ldflags '-extldflags \"-static\"' -o lightwalletd ."
 
 log "Linking built binaries into $BIN_DIR"
-as_user "ln -sf '$TREASURECHEST_DIR/src/pirated' '$BIN_DIR/pirated'"
-as_user "ln -sf '$TREASURECHEST_DIR/src/pirate-cli' '$BIN_DIR/pirate-cli'"
+as_user "ln -sf '$TREASURECHEST_ARTIFACTS_BIN/pirated' '$BIN_DIR/pirated'"
+as_user "ln -sf '$TREASURECHEST_ARTIFACTS_BIN/pirate-cli' '$BIN_DIR/pirate-cli'"
 as_user "ln -sf '$LWD_BUILD_DIR/lightwalletd' '$BIN_DIR/lightwalletd'"
+# pirated finds these by resolving its own real installed path (artifacts/bin/,
+# see the `make install` step above) and looking for siblings there, so this
+# symlink is only for visibility/consistency in $BIN_DIR, not what makes
+# embedded Tor/I2P work.
+for extra_bin in pirate-networking pirate-tor pirate-i2pd pirate-tx wallet-utility; do
+  if [[ -f "$TREASURECHEST_ARTIFACTS_BIN/$extra_bin" ]]; then
+    as_user "ln -sf '$TREASURECHEST_ARTIFACTS_BIN/$extra_bin' '$BIN_DIR/$extra_bin'"
+  fi
+done
 
 log "Installing bitcore-node-pirate globally via npm ($PIRATE_BRANCH)"
 as_user "$NVM_LOAD; npm install -g 'git+https://github.com/piratenetwork/bitcore-node-pirate.git#$PIRATE_BRANCH'"
