@@ -33,8 +33,10 @@
 # Overridable via environment variables:
 #   INSTALL_DIR      Base directory for everything this script builds (default: ~<user>/pirateseednode)
 #   NODE_VERSION     Node.js version installed via nvm (default: 24.19.0)
-#   PIRATE_BRANCH    Branch for TreasureChest and the bitcore-node-pirate/bitcore-lib-pirate/insight-api-pirate/insight-ui-pirate npm installs (default: dev-ironwood)
-#   LWD_BRANCH       Branch to check out for lightwalletd (default: dev)
+#   PIRATE_BRANCH    Branch for TreasureChest (default: dev-ironwood)
+#   BITCORE_BRANCH   Branch for the bitcore-node-pirate/bitcore-lib-pirate/
+#                     insight-api-pirate/insight-ui-pirate npm installs (default: master)
+#   LWD_BRANCH       Branch to check out for lightwalletd (default: master)
 #   MAKE_JOBS        Parallelism for TreasureChest's build (default: nproc)
 #   NETWORK          livenet | testnet (default: livenet)
 #   P2P_PORT         pirated's actual P2P port to open in the firewall (default:
@@ -119,7 +121,8 @@ TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
 INSTALL_DIR="${INSTALL_DIR:-$TARGET_HOME/pirateseednode}"
 NODE_VERSION="${NODE_VERSION:-24.19.0}"
 PIRATE_BRANCH="${PIRATE_BRANCH:-dev-ironwood}"
-LWD_BRANCH="${LWD_BRANCH:-dev}"
+BITCORE_BRANCH="${BITCORE_BRANCH:-master}"
+LWD_BRANCH="${LWD_BRANCH:-master}"
 MAKE_JOBS="${MAKE_JOBS:-$(nproc)}"
 NETWORK="${NETWORK:-livenet}"
 P2P_PORT="${P2P_PORT:-45452}"
@@ -460,8 +463,8 @@ if [[ -n "$DNSSEED_HOST" ]]; then
   fi
 fi
 
-log "Installing bitcore-node-pirate globally via npm ($PIRATE_BRANCH)"
-as_user "$NVM_LOAD; npm install -g 'git+https://github.com/piratenetwork/bitcore-node-pirate.git#$PIRATE_BRANCH'"
+log "Installing bitcore-node-pirate globally via npm ($BITCORE_BRANCH)"
+as_user "$NVM_LOAD; npm install -g 'git+https://github.com/piratenetwork/bitcore-node-pirate.git#$BITCORE_BRANCH'"
 
 log "Configuring pirated (PIRATE.conf)"
 if [[ ! -f "$PIRATE_CONF" ]]; then
@@ -513,14 +516,14 @@ as_user "$NVM_LOAD; node -e \"
   fs.writeFileSync(p, JSON.stringify(c, null, 2));
 \""
 
-log "Installing insight-api/insight-ui services ($PIRATE_BRANCH)"
+log "Installing insight-api/insight-ui services ($BITCORE_BRANCH)"
 if [[ ! -d "$BITCORE_NODE_DIR/node_modules/insight-api-pirate" ]]; then
-  as_user "$NVM_LOAD; cd '$BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-api-pirate.git#$PIRATE_BRANCH'"
+  as_user "$NVM_LOAD; cd '$BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-api-pirate.git#$BITCORE_BRANCH'"
 else
   log "insight-api-pirate already installed, skipping"
 fi
 if [[ ! -d "$BITCORE_NODE_DIR/node_modules/insight-ui-pirate" ]]; then
-  as_user "$NVM_LOAD; cd '$BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-ui-pirate.git#$PIRATE_BRANCH'"
+  as_user "$NVM_LOAD; cd '$BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-ui-pirate.git#$BITCORE_BRANCH'"
 else
   log "insight-ui-pirate already installed, skipping"
 fi
@@ -686,9 +689,9 @@ $DNSSEED_INFO
   lost every time the binary is replaced and this script is what re-applies it.
 
   To update bitcore-node-pirate itself: re-run 'npm install -g
-  git+https://github.com/piratenetwork/bitcore-node-pirate.git#$PIRATE_BRANCH'
+  git+https://github.com/piratenetwork/bitcore-node-pirate.git#$BITCORE_BRANCH'
   then 'pm2 restart bitcore'. To update insight-api-pirate/insight-ui-pirate,
-  re-run the same 'bitcore-node install git+...#$PIRATE_BRANCH' command for
+  re-run the same 'bitcore-node install git+...#$BITCORE_BRANCH' command for
   each from within $BITCORE_NODE_DIR, then 'pm2 restart bitcore'.
 
   Port $P2P_PORT/tcp (P2P) was opened in ufw if it's active; open it manually
