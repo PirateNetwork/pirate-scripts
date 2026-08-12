@@ -17,13 +17,19 @@
 #                  to update.
 #   bin/           stable symlinks (pirated, pirate-cli, lightwalletd,
 #                  pirate-seeder) that config files and pm2 point at, so
-#                  updating build/ doesn't require touching config.
+#                  updating build/ doesn't require touching config. Also
+#                  where pirated-testnode (see "Optional test node" below)
+#                  lives, when enabled.
 #   bitcore-node/  the `bitcore-node create` scaffold: bitcore-node.json,
 #                  package.json, and node_modules (bitcore-node-pirate,
 #                  bitcore-lib-pirate, insight-api-pirate, insight-ui-pirate,
 #                  all pulled via git with `bitcore-node install`).
+#   bitcore-node-test/  the same, for the optional test node's bitcore-node
+#                  instance - only created when ENABLE_TESTNODE=1.
 #   data/          PIRATE.conf, chain data, lightwalletd cache - the only
-#                  directory that needs to persist/be backed up.
+#                  directory that needs to persist/be backed up. Holds
+#                  pirated-test/ and lightwalletd-test/ subdirectories too
+#                  when ENABLE_TESTNODE=1.
 #
 # bitcore-node-pirate itself is installed globally via npm from git (not
 # cloned/built), matching how its own CLI is meant to be used: `npm install
@@ -86,15 +92,66 @@
 #   DNSSEED_BRANCH   Branch to check out for pirate-seeder (default: main)
 #   DNSSEED_TOR_PROXY Optional ip:port of a SOCKS5 proxy (e.g. a separately-run
 #                     system Tor) so the seeder can also crawl Tor peers
+#   ENABLE_TESTNODE  Set to 1 to also stand up a second, independent pirated
+#                     + bitcore-node + lightwalletd stack for testing, on its
+#                     own asset chain - see "Optional test node" below.
+#                     Requires TESTNODE_DOMAIN_NAME, TESTNODE_LWD_DOMAIN_NAME,
+#                     and CERTBOT_EMAIL (or TESTNODE_CERTBOT_EMAIL) together.
+#   TESTNODE_AC_NAME  Asset chain name for the test node, passed as pirated's
+#                     -ac_name (default: PIRATETST). Also used as this node's
+#                     conf filename (<name>.conf) and pm2/nginx labels.
+#   TESTNODE_AC_IRONWOOD Block height pirated's -ac_ironwood activates the
+#                     Ironwood upgrade at on the test chain (default: 297).
+#                     Unset on the live node's chain (real Pirate mainnet
+#                     activation), so a low value here is what makes this a
+#                     useful fast-forwarded testbed for Ironwood-era work.
+#   TESTNODE_PIRATED_EXTRA_ARGS Any further -ac_* (or other) flags to pass
+#                     the test node's pirated, beyond -ac_name/-ac_ironwood
+#                     above (default: none)
+#   TESTNODE_RPC_PORT   Test node's pirated RPC port (default: 45463)
+#   TESTNODE_ZMQ_PORT   Test node's pirated zmqpub port (default: 28342)
+#   TESTNODE_BITCORE_PORT Test node's bitcore-node web API port (default: 3002)
+#   TESTNODE_LWD_GRPC_BIND Test node's lightwalletd gRPC bind (default:
+#                     127.0.0.1:9077, matching DOMAIN_NAME's loopback-binding
+#                     behavior since TESTNODE_DOMAIN_NAME is required)
+#   TESTNODE_LWD_HTTP_BIND Test node's lightwalletd HTTP bind (default: 127.0.0.1:9078)
+#   TESTNODE_DOMAIN_NAME Hostname for the test node's Insight UI/API. Required
+#                     together with TESTNODE_LWD_DOMAIN_NAME if ENABLE_TESTNODE=1
+#                     - unlike the live node's DOMAIN_NAME, this isn't optional,
+#                     since the test node's whole point includes its own
+#                     cert-backed endpoints.
+#   TESTNODE_LWD_DOMAIN_NAME Hostname for the test node's lightwalletd gRPC service.
+#   TESTNODE_CERTBOT_EMAIL Contact address for the test node's Let's Encrypt
+#                     cert (default: $CERTBOT_EMAIL)
 #
-# nginx + real TLS (when DOMAIN_NAME/LWD_DOMAIN_NAME are set):
+# nginx + real TLS (when DOMAIN_NAME/LWD_DOMAIN_NAME, and/or
+# TESTNODE_DOMAIN_NAME/TESTNODE_LWD_DOMAIN_NAME, are set):
 #   lightwalletd and bitcore-node's web service bind to 127.0.0.1 only
 #   (bitcore-node's web service can't be told to bind a specific host, so a
 #   ufw rule blocks external access to it instead, when ufw is already active).
-#   nginx gets one certbot cert covering both hostnames (one SAN cert, one
-#   renewal entry) and terminates TLS on :443 with two separate server
-#   blocks: DOMAIN_NAME proxies to bitcore-node's web port (Insight UI +
-#   insight-api-pirate), LWD_DOMAIN_NAME grpc_passes to lightwalletd.
+#   Each pair (live, and test if enabled) gets its own certbot cert (one SAN
+#   cert per pair, one renewal entry) - not a single cert shared across both,
+#   since they're independent stacks. nginx terminates TLS on :443 with one
+#   server block per hostname: DOMAIN_NAME/TESTNODE_DOMAIN_NAME proxy to their
+#   bitcore-node's web port (Insight UI + insight-api-pirate), LWD_DOMAIN_NAME/
+#   TESTNODE_LWD_DOMAIN_NAME grpc_pass to their lightwalletd.
+#
+# Optional test node (when ENABLE_TESTNODE=1):
+#   A second, fully independent pirated + bitcore-node + lightwalletd stack,
+#   for testing against a private asset chain (TESTNODE_AC_NAME, default
+#   PIRATETST) rather than real Pirate mainnet - useful for exercising
+#   in-development consensus changes (e.g. Ironwood) without touching the
+#   live chain. It reuses the same pirated/bitcore-node-pirate/lightwalletd
+#   binaries the live node already built (asset chains are just runtime
+#   flags to the same daemon, not a separate build), with its own data
+#   directories, ports, credentials, and domain-backed TLS.
+#   Since bitcore-node's spawn config has no field for extra CLI flags (only
+#   an exec path + datadir), the test node's pirated isn't spawned directly -
+#   bitcore-node's spawn.exec instead points at bin/pirated-testnode, a small
+#   wrapper this script generates that execs the real pirated with
+#   -ac_name/-ac_ironwood (and TESTNODE_PIRATED_EXTRA_ARGS, if set) prepended
+#   to whatever args bitcore-node itself passes (-datadir, etc.). Regenerated
+#   on every run so config changes take effect on next restart.
 #
 # DNS seeder (when DNSSEED_HOST is set):
 #   pirate-seeder crawls the P2P network independently of pirated/bitcore and
@@ -149,6 +206,18 @@ DNSSEED_MBOX="${DNSSEED_MBOX:-}"
 DNSSEED_PORT="${DNSSEED_PORT:-53}"
 DNSSEED_BRANCH="${DNSSEED_BRANCH:-main}"
 DNSSEED_TOR_PROXY="${DNSSEED_TOR_PROXY:-}"
+ENABLE_TESTNODE="${ENABLE_TESTNODE:-0}"
+TESTNODE_AC_NAME="${TESTNODE_AC_NAME:-PIRATETST}"
+TESTNODE_AC_IRONWOOD="${TESTNODE_AC_IRONWOOD:-297}"
+TESTNODE_PIRATED_EXTRA_ARGS="${TESTNODE_PIRATED_EXTRA_ARGS:-}"
+TESTNODE_RPC_PORT="${TESTNODE_RPC_PORT:-45463}"
+TESTNODE_ZMQ_PORT="${TESTNODE_ZMQ_PORT:-28342}"
+TESTNODE_BITCORE_PORT="${TESTNODE_BITCORE_PORT:-3002}"
+TESTNODE_LWD_GRPC_BIND="${TESTNODE_LWD_GRPC_BIND:-127.0.0.1:9077}"
+TESTNODE_LWD_HTTP_BIND="${TESTNODE_LWD_HTTP_BIND:-127.0.0.1:9078}"
+TESTNODE_DOMAIN_NAME="${TESTNODE_DOMAIN_NAME:-}"
+TESTNODE_LWD_DOMAIN_NAME="${TESTNODE_LWD_DOMAIN_NAME:-}"
+TESTNODE_CERTBOT_EMAIL="${TESTNODE_CERTBOT_EMAIL:-$CERTBOT_EMAIL}"
 
 if [[ -n "$DOMAIN_NAME" || -n "$LWD_DOMAIN_NAME" ]]; then
   if [[ -z "$DOMAIN_NAME" || -z "$LWD_DOMAIN_NAME" ]]; then
@@ -168,11 +237,23 @@ if [[ -n "$DNSSEED_HOST" || -n "$DNSSEED_NS" || -n "$DNSSEED_MBOX" ]]; then
   fi
 fi
 
+if [[ "$ENABLE_TESTNODE" == "1" ]]; then
+  if [[ -z "$TESTNODE_DOMAIN_NAME" || -z "$TESTNODE_LWD_DOMAIN_NAME" ]]; then
+    echo "ENABLE_TESTNODE=1 requires TESTNODE_DOMAIN_NAME and TESTNODE_LWD_DOMAIN_NAME (the test node's own cert-backed hostnames)." >&2
+    exit 1
+  fi
+  if [[ -z "$TESTNODE_CERTBOT_EMAIL" ]]; then
+    echo "ENABLE_TESTNODE=1 requires CERTBOT_EMAIL or TESTNODE_CERTBOT_EMAIL, so Let's Encrypt can reach you about renewal problems." >&2
+    exit 1
+  fi
+fi
+
 BUILD_DIR="$INSTALL_DIR/build"
 BIN_DIR="$INSTALL_DIR/bin"
 DATA_DIR="$INSTALL_DIR/data"
 CONFIG_DIR="$INSTALL_DIR/config"
 BITCORE_NODE_DIR="$INSTALL_DIR/bitcore-node"
+TESTNODE_BITCORE_NODE_DIR="$INSTALL_DIR/bitcore-node-test"
 
 TREASURECHEST_DIR="$BUILD_DIR/TreasureChest"
 TREASURECHEST_ARTIFACTS_BIN="$TREASURECHEST_DIR/artifacts/bin"
@@ -184,7 +265,15 @@ LWD_DATA_DIR="$DATA_DIR/lightwalletd"
 PIRATE_SEEDER_DATA_DIR="$DATA_DIR/pirate-seeder"
 PIRATE_CONF="$PIRATED_DATA_DIR/PIRATE.conf"
 
+TESTNODE_PIRATED_DATA_DIR="$DATA_DIR/pirated-test"
+TESTNODE_LWD_DATA_DIR="$DATA_DIR/lightwalletd-test"
+# pirated finds its conf by default at <datadir>/<ac_name>.conf (see
+# TreasureChest's GetConfigFile()) - named to match here, though the wrapper
+# script below also passes -conf explicitly so this isn't load-bearing.
+TESTNODE_CONF="$TESTNODE_PIRATED_DATA_DIR/$TESTNODE_AC_NAME.conf"
+
 BITCORE_NODE_JSON="$BITCORE_NODE_DIR/bitcore-node.json"
+TESTNODE_BITCORE_NODE_JSON="$TESTNODE_BITCORE_NODE_DIR/bitcore-node.json"
 ECOSYSTEM_FILE="$CONFIG_DIR/ecosystem.config.js"
 
 log() { echo -e "\n==> $*"; }
@@ -199,7 +288,7 @@ apt-get install -y \
   libcurl4-gnutls-dev bsdmainutils curl libsodium-dev bison liblz4-dev zip \
   golang-go jq openssl
 
-if [[ -n "$DOMAIN_NAME" ]]; then
+if [[ -n "$DOMAIN_NAME" || -n "$TESTNODE_DOMAIN_NAME" ]]; then
   apt-get install -y nginx certbot python3-certbot-nginx
 fi
 
@@ -251,8 +340,12 @@ fi
 
 log "Creating $INSTALL_DIR layout (owned by $TARGET_USER, no sudo needed to run or update)"
 as_user "mkdir -p '$BUILD_DIR' '$BIN_DIR' '$CONFIG_DIR' '$PIRATED_DATA_DIR' '$LWD_DATA_DIR'"
-# $BITCORE_NODE_DIR is intentionally not created here - `bitcore-node create`
-# below refuses to run if its target directory already exists.
+if [[ "$ENABLE_TESTNODE" == "1" ]]; then
+  as_user "mkdir -p '$TESTNODE_PIRATED_DATA_DIR' '$TESTNODE_LWD_DATA_DIR'"
+fi
+# $BITCORE_NODE_DIR/$TESTNODE_BITCORE_NODE_DIR are intentionally not created
+# here - `bitcore-node create` below refuses to run if its target directory
+# already exists.
 
 open_firewall_port "$P2P_PORT/tcp"
 
@@ -260,31 +353,44 @@ if [[ -n "$DNSSEED_HOST" ]]; then
   open_firewall_port "$DNSSEED_PORT/udp"
 fi
 
-if [[ -n "$DOMAIN_NAME" ]]; then
+if [[ -n "$DOMAIN_NAME" || -n "$TESTNODE_DOMAIN_NAME" ]]; then
   open_firewall_port 80/tcp
   open_firewall_port 443/tcp
   # bitcore-node's web service always binds all interfaces (no host option),
   # so it can't be restricted to loopback like lightwalletd - block it at the
   # firewall instead. lightwalletd's own ports already default to loopback
-  # above when DOMAIN_NAME is set, but deny them too as defense in depth.
+  # above when DOMAIN_NAME/TESTNODE_DOMAIN_NAME are set, but deny them too as
+  # defense in depth.
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-    ufw deny "$BITCORE_PORT/tcp" >/dev/null
-    ufw deny "${LWD_GRPC_BIND##*:}/tcp" >/dev/null
-    ufw deny "${LWD_HTTP_BIND##*:}/tcp" >/dev/null
+    if [[ -n "$DOMAIN_NAME" ]]; then
+      ufw deny "$BITCORE_PORT/tcp" >/dev/null
+      ufw deny "${LWD_GRPC_BIND##*:}/tcp" >/dev/null
+      ufw deny "${LWD_HTTP_BIND##*:}/tcp" >/dev/null
+    fi
+    if [[ -n "$TESTNODE_DOMAIN_NAME" ]]; then
+      ufw deny "$TESTNODE_BITCORE_PORT/tcp" >/dev/null
+      ufw deny "${TESTNODE_LWD_GRPC_BIND##*:}/tcp" >/dev/null
+      ufw deny "${TESTNODE_LWD_HTTP_BIND##*:}/tcp" >/dev/null
+    fi
   fi
 
   WEBROOT_DIR=/var/www/certbot
   mkdir -p "$WEBROOT_DIR"
-  CERT_DIR="/etc/letsencrypt/live/$DOMAIN_NAME"
   NGINX_SITE=/etc/nginx/sites-available/pirate-seed-node
   LWD_GRPC_PORT="${LWD_GRPC_BIND##*:}"
+  TESTNODE_LWD_GRPC_PORT="${TESTNODE_LWD_GRPC_BIND##*:}"
 
-  log "Writing initial nginx config for $DOMAIN_NAME / $LWD_DOMAIN_NAME (HTTP only, for the ACME challenge)"
+  ALL_HOSTNAMES=""
+  [[ -n "$DOMAIN_NAME" ]] && ALL_HOSTNAMES="$ALL_HOSTNAMES $DOMAIN_NAME $LWD_DOMAIN_NAME"
+  [[ -n "$TESTNODE_DOMAIN_NAME" ]] && ALL_HOSTNAMES="$ALL_HOSTNAMES $TESTNODE_DOMAIN_NAME $TESTNODE_LWD_DOMAIN_NAME"
+  ALL_HOSTNAMES="${ALL_HOSTNAMES# }"
+
+  log "Writing initial nginx config for$ALL_HOSTNAMES (HTTP only, for the ACME challenge)"
   cat > "$NGINX_SITE" <<EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN_NAME $LWD_DOMAIN_NAME;
+    server_name $ALL_HOSTNAMES;
 
     location /.well-known/acme-challenge/ {
         root $WEBROOT_DIR;
@@ -308,29 +414,32 @@ EOF
     systemctl start nginx
   fi
 
-  if [[ ! -f "$CERT_DIR/fullchain.pem" ]]; then
-    log "Obtaining Let's Encrypt certificate for $DOMAIN_NAME + $LWD_DOMAIN_NAME"
-    certbot certonly --webroot -w "$WEBROOT_DIR" -d "$DOMAIN_NAME" -d "$LWD_DOMAIN_NAME" \
-      --non-interactive --agree-tos -m "$CERTBOT_EMAIL"
-  else
-    log "Certificate covering $DOMAIN_NAME/$LWD_DOMAIN_NAME already exists, skipping issuance"
+  # Each pair gets its own cert/renewal entry - independent stacks, not one
+  # shared SAN cert across live+test.
+  if [[ -n "$DOMAIN_NAME" ]]; then
+    CERT_DIR="/etc/letsencrypt/live/$DOMAIN_NAME"
+    if [[ ! -f "$CERT_DIR/fullchain.pem" ]]; then
+      log "Obtaining Let's Encrypt certificate for $DOMAIN_NAME + $LWD_DOMAIN_NAME"
+      certbot certonly --webroot -w "$WEBROOT_DIR" -d "$DOMAIN_NAME" -d "$LWD_DOMAIN_NAME" \
+        --non-interactive --agree-tos -m "$CERTBOT_EMAIL"
+    else
+      log "Certificate covering $DOMAIN_NAME/$LWD_DOMAIN_NAME already exists, skipping issuance"
+    fi
+  fi
+  if [[ -n "$TESTNODE_DOMAIN_NAME" ]]; then
+    TESTNODE_CERT_DIR="/etc/letsencrypt/live/$TESTNODE_DOMAIN_NAME"
+    if [[ ! -f "$TESTNODE_CERT_DIR/fullchain.pem" ]]; then
+      log "Obtaining Let's Encrypt certificate for $TESTNODE_DOMAIN_NAME + $TESTNODE_LWD_DOMAIN_NAME"
+      certbot certonly --webroot -w "$WEBROOT_DIR" -d "$TESTNODE_DOMAIN_NAME" -d "$TESTNODE_LWD_DOMAIN_NAME" \
+        --non-interactive --agree-tos -m "$TESTNODE_CERTBOT_EMAIL"
+    else
+      log "Certificate covering $TESTNODE_DOMAIN_NAME/$TESTNODE_LWD_DOMAIN_NAME already exists, skipping issuance"
+    fi
   fi
 
-  log "Writing final nginx config (TLS termination + reverse proxy, two server blocks)"
-  cat > "$NGINX_SITE" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $DOMAIN_NAME $LWD_DOMAIN_NAME;
-
-    location /.well-known/acme-challenge/ {
-        root $WEBROOT_DIR;
-    }
-
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
+  LIVE_TLS_BLOCKS=""
+  if [[ -n "$DOMAIN_NAME" ]]; then
+    LIVE_TLS_BLOCKS=$(cat <<EOF
 
 # Insight UI + insight-api-pirate, served by bitcore-node's web service
 server {
@@ -363,6 +472,66 @@ server {
         grpc_pass grpc://127.0.0.1:$LWD_GRPC_PORT;
     }
 }
+EOF
+)
+  fi
+
+  TEST_TLS_BLOCKS=""
+  if [[ -n "$TESTNODE_DOMAIN_NAME" ]]; then
+    TEST_TLS_BLOCKS=$(cat <<EOF
+
+# Test node ($TESTNODE_AC_NAME): Insight UI + insight-api-pirate
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $TESTNODE_DOMAIN_NAME;
+
+    ssl_certificate     $TESTNODE_CERT_DIR/fullchain.pem;
+    ssl_certificate_key $TESTNODE_CERT_DIR/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:$TESTNODE_BITCORE_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+
+# Test node ($TESTNODE_AC_NAME): lightwalletd's gRPC service
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $TESTNODE_LWD_DOMAIN_NAME;
+
+    ssl_certificate     $TESTNODE_CERT_DIR/fullchain.pem;
+    ssl_certificate_key $TESTNODE_CERT_DIR/privkey.pem;
+
+    location / {
+        grpc_pass grpc://127.0.0.1:$TESTNODE_LWD_GRPC_PORT;
+    }
+}
+EOF
+)
+  fi
+
+  log "Writing final nginx config (TLS termination + reverse proxy)"
+  cat > "$NGINX_SITE" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $ALL_HOSTNAMES;
+
+    location /.well-known/acme-challenge/ {
+        root $WEBROOT_DIR;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+$LIVE_TLS_BLOCKS
+$TEST_TLS_BLOCKS
 EOF
   nginx -t
   systemctl reload nginx
@@ -495,6 +664,49 @@ else
   log "PIRATE.conf already exists, leaving credentials untouched"
 fi
 
+if [[ "$ENABLE_TESTNODE" == "1" ]]; then
+  log "Configuring the test node's pirated ($TESTNODE_CONF)"
+  if [[ ! -f "$TESTNODE_CONF" ]]; then
+    TESTNODE_RPC_USER="pirate_$(openssl rand -hex 6)"
+    TESTNODE_RPC_PASSWORD=$(openssl rand -hex 24)
+    as_user "cat > '$TESTNODE_CONF' <<EOF
+server=1
+listen=1
+maxconnections=256
+rpcuser=$TESTNODE_RPC_USER
+rpcpassword=$TESTNODE_RPC_PASSWORD
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=$TESTNODE_RPC_PORT
+rpcworkqueue=128
+experimentalfeatures=1
+txindex=1
+addressindex=1
+timestampindex=1
+spentindex=1
+zmqpubrawtx=tcp://127.0.0.1:$TESTNODE_ZMQ_PORT
+zmqpubhashblock=tcp://127.0.0.1:$TESTNODE_ZMQ_PORT
+EOF"
+  else
+    log "$TESTNODE_CONF already exists, leaving credentials untouched"
+  fi
+
+  # bitcore-node's spawn config has no field for extra CLI flags (only an
+  # exec path + datadir), so -ac_name/-ac_ironwood can't be set via
+  # bitcore-node.json directly - this wrapper injects them ahead of whatever
+  # args bitcore-node itself passes (-datadir, etc.), forwarded via "$@".
+  # -conf is passed explicitly too rather than relying on pirated's default
+  # <datadir>/<ac_name>.conf discovery. Regenerated every run (no secrets
+  # live here) so config changes take effect on next restart.
+  log "Writing pirated-testnode wrapper script"
+  as_user "cat > '$BIN_DIR/pirated-testnode' <<EOF
+#!/usr/bin/env bash
+# Regenerated by deploy-seed-node.sh on every run - do not edit directly.
+exec '$BIN_DIR/pirated' --ac_name=$TESTNODE_AC_NAME --ac_ironwood=$TESTNODE_AC_IRONWOOD --conf='$TESTNODE_CONF' $TESTNODE_PIRATED_EXTRA_ARGS \"\\\$@\"
+EOF"
+  as_user "chmod +x '$BIN_DIR/pirated-testnode'"
+fi
+
 log "Scaffolding bitcore-node instance directory"
 if [[ ! -f "$BITCORE_NODE_JSON" ]]; then
   CREATE_NETWORK_FLAG=""
@@ -528,6 +740,40 @@ else
   log "insight-ui-pirate already installed, skipping"
 fi
 
+if [[ "$ENABLE_TESTNODE" == "1" ]]; then
+  log "Scaffolding the test node's bitcore-node instance directory"
+  if [[ ! -f "$TESTNODE_BITCORE_NODE_JSON" ]]; then
+    as_user "$NVM_LOAD; bitcore-node create -d '$TESTNODE_PIRATED_DATA_DIR' '$TESTNODE_BITCORE_NODE_DIR'"
+  else
+    log "$TESTNODE_BITCORE_NODE_JSON already exists, leaving it as-is"
+  fi
+
+  # Same as the live node's patch above, except exec points at the
+  # pirated-testnode wrapper (not pirated directly) so -ac_name/-ac_ironwood
+  # get injected.
+  as_user "$NVM_LOAD; node -e \"
+    const fs = require('fs');
+    const p = '$TESTNODE_BITCORE_NODE_JSON';
+    const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+    c.port = $TESTNODE_BITCORE_PORT;
+    c.servicesConfig.bitcoind.spawn.datadir = '$TESTNODE_PIRATED_DATA_DIR';
+    c.servicesConfig.bitcoind.spawn.exec = '$BIN_DIR/pirated-testnode';
+    fs.writeFileSync(p, JSON.stringify(c, null, 2));
+  \""
+
+  log "Installing insight-api/insight-ui services for the test node ($BITCORE_BRANCH)"
+  if [[ ! -d "$TESTNODE_BITCORE_NODE_DIR/node_modules/insight-api-pirate" ]]; then
+    as_user "$NVM_LOAD; cd '$TESTNODE_BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-api-pirate.git#$BITCORE_BRANCH'"
+  else
+    log "insight-api-pirate already installed for the test node, skipping"
+  fi
+  if [[ ! -d "$TESTNODE_BITCORE_NODE_DIR/node_modules/insight-ui-pirate" ]]; then
+    as_user "$NVM_LOAD; cd '$TESTNODE_BITCORE_NODE_DIR' && bitcore-node install 'git+https://github.com/piratenetwork/insight-ui-pirate.git#$BITCORE_BRANCH'"
+  else
+    log "insight-ui-pirate already installed for the test node, skipping"
+  fi
+fi
+
 BITCORE_NODE_BIN=$(as_user "$NVM_LOAD; command -v bitcore-node")
 
 log "Writing pm2 ecosystem file"
@@ -540,6 +786,34 @@ elif [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]]; then
   LWD_ARGS="$LWD_ARGS --tls-cert $TLS_CERT --tls-key $TLS_KEY"
 else
   LWD_ARGS="$LWD_ARGS --gen-cert-very-insecure"
+fi
+
+TESTNODE_APPS_JS=""
+if [[ "$ENABLE_TESTNODE" == "1" ]]; then
+  # TESTNODE_DOMAIN_NAME is required whenever ENABLE_TESTNODE=1 (validated
+  # above), so this is always the nginx-terminates-TLS case - no self-signed
+  # fallback branch needed here, unlike the live node's LWD_ARGS above.
+  TESTNODE_LWD_ARGS="--grpc-bind-addr $TESTNODE_LWD_GRPC_BIND --http-bind-addr $TESTNODE_LWD_HTTP_BIND --pirate-conf-path $TESTNODE_CONF --data-dir $TESTNODE_LWD_DATA_DIR --no-tls-very-insecure"
+  TESTNODE_APPS_JS=",
+    {
+      name: 'bitcore-test',
+      cwd: '$TESTNODE_BITCORE_NODE_DIR',
+      script: '$BITCORE_NODE_BIN',
+      args: 'start --config $TESTNODE_BITCORE_NODE_DIR',
+      interpreter: 'node',
+      autorestart: true,
+      max_restarts: 30,
+      restart_delay: 5000
+    },
+    {
+      name: 'lightwalletd-test',
+      cwd: '$BIN_DIR',
+      script: './lightwalletd',
+      args: '$TESTNODE_LWD_ARGS',
+      autorestart: true,
+      max_restarts: 30,
+      restart_delay: 5000
+    }"
 fi
 
 DNSSEED_APP_JS=""
@@ -580,7 +854,7 @@ module.exports = {
       autorestart: true,
       max_restarts: 30,
       restart_delay: 5000
-    }$DNSSEED_APP_JS
+    }$TESTNODE_APPS_JS$DNSSEED_APP_JS
   ]
 };
 EOF"
@@ -603,6 +877,27 @@ fi
 
 log "Starting lightwalletd under pm2"
 as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only lightwalletd"
+
+if [[ "$ENABLE_TESTNODE" == "1" ]]; then
+  log "Starting bitcore-test under pm2 and waiting for the test node's pirated RPC to come up"
+  as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only bitcore-test"
+
+  TESTNODE_RPC_READY=0
+  for _ in $(seq 1 60); do
+    if as_user "'$BIN_DIR/pirate-cli' -conf='$TESTNODE_CONF' -datadir='$TESTNODE_PIRATED_DATA_DIR' getinfo" >/dev/null 2>&1; then
+      TESTNODE_RPC_READY=1
+      break
+    fi
+    sleep 5
+  done
+
+  if [[ "$TESTNODE_RPC_READY" -ne 1 ]]; then
+    echo "WARNING: test node's pirated RPC did not respond within 5 minutes. Starting lightwalletd-test anyway; pm2 will keep retrying it." >&2
+  fi
+
+  log "Starting lightwalletd-test under pm2"
+  as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only lightwalletd-test"
+fi
 
 if [[ -n "$DNSSEED_HOST" ]]; then
   log "Starting pirate-seeder under pm2"
@@ -637,6 +932,31 @@ else
   a real Let's Encrypt cert in front of both instead."
 fi
 
+if [[ "$ENABLE_TESTNODE" == "1" ]]; then
+  TESTNODE_INFO="
+  Test node ($TESTNODE_AC_NAME, -ac_ironwood=$TESTNODE_AC_IRONWOOD):
+    pirated + bitcore-node : pm2 process \"bitcore-test\"      (RPC on 127.0.0.1:$TESTNODE_RPC_PORT, web API + Insight on :$TESTNODE_BITCORE_PORT)
+    lightwalletd           : pm2 process \"lightwalletd-test\" (gRPC on $TESTNODE_LWD_GRPC_BIND, HTTP on $TESTNODE_LWD_HTTP_BIND)
+    Insight UI:        https://$TESTNODE_DOMAIN_NAME/
+    Insight API:       https://$TESTNODE_DOMAIN_NAME/insight-api-pirate/
+    lightwalletd gRPC: $TESTNODE_LWD_DOMAIN_NAME:443
+    Conf/data: $TESTNODE_CONF, $TESTNODE_PIRATED_DATA_DIR, $TESTNODE_LWD_DATA_DIR
+    Wrapper:   $BIN_DIR/pirated-testnode (injects -ac_name/-ac_ironwood into
+               pirated's args; regenerated every run of this script, so
+               changing TESTNODE_AC_NAME/TESTNODE_AC_IRONWOOD/
+               TESTNODE_PIRATED_EXTRA_ARGS and re-running takes effect on
+               the next 'pm2 restart bitcore-test')
+    This is a private asset chain, not real Pirate mainnet - pirated's actual
+    P2P port is asset-chain-derived (same caveat as P2P_PORT above) and isn't
+    opened in the firewall automatically; open it yourself if you want this
+    chain reachable by other $TESTNODE_AC_NAME peers."
+else
+  TESTNODE_INFO="
+  Test node: not running. Set ENABLE_TESTNODE=1 (with TESTNODE_DOMAIN_NAME,
+  TESTNODE_LWD_DOMAIN_NAME, and CERTBOT_EMAIL/TESTNODE_CERTBOT_EMAIL) and
+  re-run this script to add one."
+fi
+
 if [[ -n "$DNSSEED_HOST" ]]; then
   DNSSEED_INFO="
   pirate-seeder          : pm2 process \"pirate-seeder\" (UDP $DNSSEED_PORT)
@@ -664,13 +984,15 @@ cat <<SUMMARY
   lightwalletd           : pm2 process "lightwalletd" (gRPC on $LWD_GRPC_BIND, HTTP on $LWD_HTTP_BIND)
 
 $ACCESS_INFO
+$TESTNODE_INFO
 $DNSSEED_INFO
 
   Layout (all owned by $TARGET_USER, no sudo needed for day-to-day use):
     $BUILD_DIR        TreasureChest/lightwalletd/pirate-seeder source + compiled binaries - pull/rebuild here to update
-    $BIN_DIR          stable symlinks that config/pm2 point at
+    $BIN_DIR          stable symlinks that config/pm2 point at (and pirated-testnode, if ENABLE_TESTNODE=1)
     $BITCORE_NODE_DIR bitcore-node.json + node_modules (bitcore-node-pirate, insight-api-pirate, insight-ui-pirate)
-    $DATA_DIR         chain data, PIRATE.conf, lightwalletd cache, dnsseed.dat - back this up
+    $TESTNODE_BITCORE_NODE_DIR  same, for the test node (if ENABLE_TESTNODE=1)
+    $DATA_DIR         chain data, PIRATE.conf, lightwalletd cache, dnsseed.dat, and the test node's own data/conf - back this up
     $CONFIG_DIR       pm2 ecosystem.config.js
 
   RPC credentials: $PIRATE_CONF (generated on first run, not printed here)
@@ -679,11 +1001,14 @@ $DNSSEED_INFO
     pm2 status
     pm2 logs bitcore
     pm2 logs lightwalletd
+    pm2 logs bitcore-test
+    pm2 logs lightwalletd-test
     pm2 logs pirate-seeder
 
   To update pirated/lightwalletd/pirate-seeder: pull + rebuild in $BUILD_DIR,
-  then 'pm2 restart bitcore lightwalletd pirate-seeder' (the $BIN_DIR symlinks
-  pick up the new binaries automatically - no config changes needed). If
+  then 'pm2 restart bitcore lightwalletd bitcore-test lightwalletd-test
+  pirate-seeder' (the $BIN_DIR symlinks pick up the new binaries automatically
+  - no config changes needed; pirated-testnode wraps the same symlink). If
   DNSSEED_PORT is below 1024, re-run this script instead of restarting
   manually after rebuilding pirate-seeder - the CAP_NET_BIND_SERVICE grant is
   lost every time the binary is replaced and this script is what re-applies it.
