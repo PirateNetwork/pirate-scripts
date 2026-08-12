@@ -98,8 +98,9 @@
 #                     Requires TESTNODE_DOMAIN_NAME, TESTNODE_LWD_DOMAIN_NAME,
 #                     and CERTBOT_EMAIL (or TESTNODE_CERTBOT_EMAIL) together.
 #   TESTNODE_AC_NAME  Asset chain name for the test node, passed as pirated's
-#                     -ac_name (default: PIRATETST). Also used as this node's
-#                     conf filename (<name>.conf) and pm2/nginx labels.
+#                     -ac_name (default: PIRATETST). Also used for pm2/nginx
+#                     labels. NOT used as this node's conf filename - see
+#                     TESTNODE_CONF below for why it has to stay PIRATE.conf.
 #   TESTNODE_AC_IRONWOOD Block height pirated's -ac_ironwood activates the
 #                     Ironwood upgrade at on the test chain (default: 297).
 #                     Unset on the live node's chain (real Pirate mainnet
@@ -267,10 +268,17 @@ PIRATE_CONF="$PIRATED_DATA_DIR/PIRATE.conf"
 
 TESTNODE_PIRATED_DATA_DIR="$DATA_DIR/pirated-test"
 TESTNODE_LWD_DATA_DIR="$DATA_DIR/lightwalletd-test"
-# pirated finds its conf by default at <datadir>/<ac_name>.conf (see
-# TreasureChest's GetConfigFile()) - named to match here, though the wrapper
-# script below also passes -conf explicitly so this isn't load-bearing.
-TESTNODE_CONF="$TESTNODE_PIRATED_DATA_DIR/$TESTNODE_AC_NAME.conf"
+# Must be named exactly PIRATE.conf, not "$TESTNODE_AC_NAME.conf" - pirated
+# itself doesn't care (the wrapper script below passes -conf explicitly, so
+# pirated's own <datadir>/<ac_name>.conf discovery is moot), but
+# bitcore-node-pirate's bitcoind service hardcodes
+# `path.resolve(spawn.datadir, './PIRATE.conf')` (lib/services/bitcoind.js)
+# with no awareness of -ac_name at all. If this file were named anything
+# else, bitcore-node-pirate would silently auto-create its own PIRATE.conf
+# here with hardcoded default credentials (rpcuser=bitcoin/rpcpassword=
+# local321) that don't match what pirated was actually launched with,
+# and it would never successfully authenticate to its own pirated.
+TESTNODE_CONF="$TESTNODE_PIRATED_DATA_DIR/PIRATE.conf"
 
 BITCORE_NODE_JSON="$BITCORE_NODE_DIR/bitcore-node.json"
 TESTNODE_BITCORE_NODE_JSON="$TESTNODE_BITCORE_NODE_DIR/bitcore-node.json"
@@ -777,7 +785,11 @@ fi
 BITCORE_NODE_BIN=$(as_user "$NVM_LOAD; command -v bitcore-node")
 
 log "Writing pm2 ecosystem file"
-LWD_ARGS="--grpc-bind-addr $LWD_GRPC_BIND --http-bind-addr $LWD_HTTP_BIND --pirate-conf-path $PIRATE_CONF --data-dir $LWD_DATA_DIR"
+# --log-file defaults to ./server.log (relative to lightwalletd's cwd, which
+# both the live and test lightwalletd pm2 apps set to $BIN_DIR) - left
+# unset, both instances would write to the exact same $BIN_DIR/server.log.
+# Point each at its own data dir instead.
+LWD_ARGS="--grpc-bind-addr $LWD_GRPC_BIND --http-bind-addr $LWD_HTTP_BIND --pirate-conf-path $PIRATE_CONF --data-dir $LWD_DATA_DIR --log-file $LWD_DATA_DIR/server.log"
 if [[ -n "$DOMAIN_NAME" ]]; then
   # nginx terminates TLS and is the only thing that can reach these
   # loopback-bound ports, so plaintext here is safe.
@@ -793,7 +805,7 @@ if [[ "$ENABLE_TESTNODE" == "1" ]]; then
   # TESTNODE_DOMAIN_NAME is required whenever ENABLE_TESTNODE=1 (validated
   # above), so this is always the nginx-terminates-TLS case - no self-signed
   # fallback branch needed here, unlike the live node's LWD_ARGS above.
-  TESTNODE_LWD_ARGS="--grpc-bind-addr $TESTNODE_LWD_GRPC_BIND --http-bind-addr $TESTNODE_LWD_HTTP_BIND --pirate-conf-path $TESTNODE_CONF --data-dir $TESTNODE_LWD_DATA_DIR --no-tls-very-insecure"
+  TESTNODE_LWD_ARGS="--grpc-bind-addr $TESTNODE_LWD_GRPC_BIND --http-bind-addr $TESTNODE_LWD_HTTP_BIND --pirate-conf-path $TESTNODE_CONF --data-dir $TESTNODE_LWD_DATA_DIR --log-file $TESTNODE_LWD_DATA_DIR/server.log --no-tls-very-insecure"
   TESTNODE_APPS_JS=",
     {
       name: 'bitcore-test',
