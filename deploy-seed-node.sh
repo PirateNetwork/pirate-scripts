@@ -789,7 +789,11 @@ log "Writing pm2 ecosystem file"
 # both the live and test lightwalletd pm2 apps set to $BIN_DIR) - left
 # unset, both instances would write to the exact same $BIN_DIR/server.log.
 # Point each at its own data dir instead.
-LWD_ARGS="--grpc-bind-addr $LWD_GRPC_BIND --http-bind-addr $LWD_HTTP_BIND --pirate-conf-path $PIRATE_CONF --data-dir $LWD_DATA_DIR --log-file $LWD_DATA_DIR/server.log"
+# --tor-enable/--i2p-enable publish lightwalletd itself as a Tor hidden
+# service / I2P destination, over the same embedded Tor/i2pd daemons
+# pirated already runs - --pirate-conf-path only fills in non-default
+# control/SAM addresses once these are on, it doesn't turn them on.
+LWD_ARGS="--grpc-bind-addr $LWD_GRPC_BIND --http-bind-addr $LWD_HTTP_BIND --pirate-conf-path $PIRATE_CONF --data-dir $LWD_DATA_DIR --log-file $LWD_DATA_DIR/server.log --tor-enable --i2p-enable"
 if [[ -n "$DOMAIN_NAME" ]]; then
   # nginx terminates TLS and is the only thing that can reach these
   # loopback-bound ports, so plaintext here is safe.
@@ -805,7 +809,7 @@ if [[ "$ENABLE_TESTNODE" == "1" ]]; then
   # TESTNODE_DOMAIN_NAME is required whenever ENABLE_TESTNODE=1 (validated
   # above), so this is always the nginx-terminates-TLS case - no self-signed
   # fallback branch needed here, unlike the live node's LWD_ARGS above.
-  TESTNODE_LWD_ARGS="--grpc-bind-addr $TESTNODE_LWD_GRPC_BIND --http-bind-addr $TESTNODE_LWD_HTTP_BIND --pirate-conf-path $TESTNODE_CONF --data-dir $TESTNODE_LWD_DATA_DIR --log-file $TESTNODE_LWD_DATA_DIR/server.log --no-tls-very-insecure"
+  TESTNODE_LWD_ARGS="--grpc-bind-addr $TESTNODE_LWD_GRPC_BIND --http-bind-addr $TESTNODE_LWD_HTTP_BIND --pirate-conf-path $TESTNODE_CONF --data-dir $TESTNODE_LWD_DATA_DIR --log-file $TESTNODE_LWD_DATA_DIR/server.log --no-tls-very-insecure --tor-enable --i2p-enable"
   TESTNODE_APPS_JS=",
     {
       name: 'bitcore-test',
