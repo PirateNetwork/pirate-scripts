@@ -37,7 +37,7 @@
 # them, e.g. moving to a new branch):
 #   INSTALL_DIR    Must match the deploy-seed-node.sh install (default: ~<user>/pirateseednode)
 #   NODE_VERSION   Node.js version already installed via nvm (default: 24.19.0)
-#   PIRATE_BRANCH  Branch for TreasureChest (default: dev-ironwood)
+#   PIRATE_BRANCH  Branch for TreasureChest (default: master)
 #   BITCORE_BRANCH Branch for bitcore-node-pirate/insight-api-pirate/insight-ui-pirate (default: master)
 #   LWD_BRANCH     Branch for lightwalletd (default: master)
 #   DNSSEED_BRANCH Branch for pirate-seeder, if deployed (default: main)
@@ -58,7 +58,7 @@ TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
 
 INSTALL_DIR="${INSTALL_DIR:-$TARGET_HOME/pirateseednode}"
 NODE_VERSION="${NODE_VERSION:-24.19.0}"
-PIRATE_BRANCH="${PIRATE_BRANCH:-dev-ironwood}"
+PIRATE_BRANCH="${PIRATE_BRANCH:-master}"
 BITCORE_BRANCH="${BITCORE_BRANCH:-master}"
 LWD_BRANCH="${LWD_BRANCH:-master}"
 DNSSEED_BRANCH="${DNSSEED_BRANCH:-main}"

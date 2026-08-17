@@ -39,7 +39,7 @@
 # Overridable via environment variables:
 #   INSTALL_DIR      Base directory for everything this script builds (default: ~<user>/pirateseednode)
 #   NODE_VERSION     Node.js version installed via nvm (default: 24.19.0)
-#   PIRATE_BRANCH    Branch for TreasureChest (default: dev-ironwood)
+#   PIRATE_BRANCH    Branch for TreasureChest (default: master)
 #   BITCORE_BRANCH   Branch for the bitcore-node-pirate/bitcore-lib-pirate/
 #                     insight-api-pirate/insight-ui-pirate npm installs (default: master)
 #   LWD_BRANCH       Branch to check out for lightwalletd (default: master)
@@ -178,7 +178,7 @@ TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
 
 INSTALL_DIR="${INSTALL_DIR:-$TARGET_HOME/pirateseednode}"
 NODE_VERSION="${NODE_VERSION:-24.19.0}"
-PIRATE_BRANCH="${PIRATE_BRANCH:-dev-ironwood}"
+PIRATE_BRANCH="${PIRATE_BRANCH:-master}"
 BITCORE_BRANCH="${BITCORE_BRANCH:-master}"
 LWD_BRANCH="${LWD_BRANCH:-master}"
 MAKE_JOBS="${MAKE_JOBS:-$(nproc)}"
