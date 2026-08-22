@@ -20,9 +20,10 @@
 #   5. Deletes and re-registers every pm2 process, waiting for each
 #      pirated's RPC to come up before starting its lightwalletd.
 #
-# What is deployed (test node? pirate-seeder?) is detected automatically
-# from what already exists under INSTALL_DIR - no need to re-pass
-# ENABLE_TESTNODE/DNSSEED_HOST/etc. Deliberately does not touch: nginx
+# What is deployed (test node? pirate-seeder? bootstrap-source node?) is
+# detected automatically from what already exists under INSTALL_DIR - no
+# need to re-pass ENABLE_TESTNODE/DNSSEED_HOST/ENABLE_BOOTSTRAP_NODE/etc.
+# Deliberately does not touch: nginx
 # config, certbot/TLS certificates, PIRATE.conf or the test node's conf
 # (credentials + RPC/ZMQ ports stay exactly as originally deployed), or any
 # data directory's contents. Also doesn't re-run apt-get - routine commits
@@ -79,6 +80,8 @@ PIRATE_SEEDER_DIR="$BUILD_DIR/pirate-seeder"
 PIRATED_DATA_DIR="$DATA_DIR/pirated"
 PIRATE_CONF="$PIRATED_DATA_DIR/PIRATE.conf"
 TESTNODE_PIRATED_DATA_DIR="$DATA_DIR/pirated-test"
+BOOTSTRAP_PIRATED_DATA_DIR="$DATA_DIR/pirated-bootstrap"
+BOOTSTRAP_CONF="$BOOTSTRAP_PIRATED_DATA_DIR/PIRATE.conf"
 
 BITCORE_NODE_JSON="$BITCORE_NODE_DIR/bitcore-node.json"
 TESTNODE_BITCORE_NODE_JSON="$TESTNODE_BITCORE_NODE_DIR/bitcore-node.json"
@@ -93,6 +96,8 @@ HAS_TESTNODE=0
 [[ -f "$TESTNODE_BITCORE_NODE_JSON" ]] && HAS_TESTNODE=1
 HAS_DNSSEED=0
 [[ -d "$PIRATE_SEEDER_DIR/.git" ]] && HAS_DNSSEED=1
+HAS_BOOTSTRAP_NODE=0
+[[ -f "$BOOTSTRAP_CONF" ]] && HAS_BOOTSTRAP_NODE=1
 
 # The test node's conf filename depends on its -ac_name (default PIRATETST,
 # but could've been overridden at deploy time) - rather than requiring that
@@ -111,8 +116,9 @@ NVM_LOAD="export NVM_DIR=\"$TARGET_HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"; nvm
 PM2_APPS=(bitcore lightwalletd)
 [[ "$HAS_TESTNODE" == "1" ]] && PM2_APPS+=(bitcore-test lightwalletd-test)
 [[ "$HAS_DNSSEED" == "1" ]] && PM2_APPS+=(pirate-seeder)
+[[ "$HAS_BOOTSTRAP_NODE" == "1" ]] && PM2_APPS+=(bootstrap-node)
 
-log "Detected: test node $([[ $HAS_TESTNODE == 1 ]] && echo yes || echo no), pirate-seeder $([[ $HAS_DNSSEED == 1 ]] && echo yes || echo no)"
+log "Detected: test node $([[ $HAS_TESTNODE == 1 ]] && echo yes || echo no), pirate-seeder $([[ $HAS_DNSSEED == 1 ]] && echo yes || echo no), bootstrap-source node $([[ $HAS_BOOTSTRAP_NODE == 1 ]] && echo yes || echo no)"
 log "Stopping pm2 services: ${PM2_APPS[*]}"
 as_user "$NVM_LOAD; pm2 stop ${PM2_APPS[*]}" || true
 
@@ -240,6 +246,12 @@ fi
 if [[ "$HAS_DNSSEED" == "1" ]]; then
   log "Starting pirate-seeder under pm2"
   as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only pirate-seeder"
+fi
+
+if [[ "$HAS_BOOTSTRAP_NODE" == "1" ]]; then
+  log "Starting bootstrap-node under pm2 and waiting for its pirated RPC to come up"
+  as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only bootstrap-node"
+  wait_for_rpc "$BOOTSTRAP_CONF" "$BOOTSTRAP_PIRATED_DATA_DIR" "bootstrap-source node's"
 fi
 
 log "Persisting pm2 process list"

@@ -124,9 +124,34 @@
 #   TESTNODE_LWD_DOMAIN_NAME Hostname for the test node's lightwalletd gRPC service.
 #   TESTNODE_CERTBOT_EMAIL Contact address for the test node's Let's Encrypt
 #                     cert (default: $CERTBOT_EMAIL)
+#   ENABLE_BOOTSTRAP_NODE Set to 1 to stand up a third, independent pirated
+#                     instance whose only job is holding synced chain data
+#                     for a bootstrap-snapshot.sh timer to tar up - see
+#                     "Bootstrap-source node" below. Decoupled from the live
+#                     node/bitcore/lightwalletd so a daily snapshot never
+#                     causes production downtime.
+#   BOOTSTRAP_RPC_PORT Bootstrap-source node's pirated RPC port (default:
+#                     45483)
+#   BOOTSTRAP_LISTEN  Set to 1 to let the bootstrap-source node accept
+#                     inbound P2P (default: 0, outbound-only). Only turn
+#                     this on if nothing else on this host is already
+#                     listening on this chain's P2P port (Pirate's real
+#                     port is asset-chain-derived, not independently
+#                     configurable per instance - see P2P_PORT above - so a
+#                     second listening mainnet instance on the SAME host as
+#                     the live node WILL conflict with it).
+#   BOOTSTRAP_OUTPUT_DIR Where bootstrap-snapshot.sh publishes the tarball +
+#                     sha256 (default: $INSTALL_DIR/bootstrap-www)
+#   BOOTSTRAP_DOMAIN_NAME Hostname for serving $BOOTSTRAP_OUTPUT_DIR over
+#                     HTTPS (e.g. bootstrap1.cryptoforge.cc) - requires
+#                     ENABLE_BOOTSTRAP_NODE=1 and CERTBOT_EMAIL. Leave unset
+#                     to provision the bootstrap-source node without nginx/
+#                     a public endpoint (e.g. if something else serves
+#                     $BOOTSTRAP_OUTPUT_DIR, or it's rsynced elsewhere).
 #
-# nginx + real TLS (when DOMAIN_NAME/LWD_DOMAIN_NAME, and/or
-# TESTNODE_DOMAIN_NAME/TESTNODE_LWD_DOMAIN_NAME, are set):
+# nginx + real TLS (when DOMAIN_NAME/LWD_DOMAIN_NAME,
+# TESTNODE_DOMAIN_NAME/TESTNODE_LWD_DOMAIN_NAME, and/or
+# BOOTSTRAP_DOMAIN_NAME, are set):
 #   lightwalletd and bitcore-node's web service bind to 127.0.0.1 only
 #   (bitcore-node's web service can't be told to bind a specific host, so a
 #   ufw rule blocks external access to it instead, when ufw is already active).
@@ -165,6 +190,20 @@
 #   simply skipped until it is), and can crawl Tor peers via DNSSEED_TOR_PROXY.
 #   The DNS delegation itself (an A + NS record at your DNS provider) has to
 #   be done by hand beforehand - see pirate-seeder/README.md.
+#
+# Bootstrap-source node (when ENABLE_BOOTSTRAP_NODE=1):
+#   A third, independent pirated instance (pm2 process "bootstrap-node"),
+#   own datadir/conf/RPC port, default indexes (no addressindex/
+#   timestampindex/spentindex - nothing queries this instance besides
+#   bootstrap-snapshot.sh and the P2P network it syncs from), embedded Tor/
+#   I2P disabled (torautostart=0, i2pdautostart=0), outbound-only by default
+#   (listen=0, see BOOTSTRAP_LISTEN above). Run pirate-scripts/
+#   bootstrap-snapshot.sh (separately, e.g. on a daily systemd timer via
+#   its own --install-timer) to stop/tar/restart this instance and publish
+#   a fresh blocks+chainstate tarball - the live node/bitcore/lightwalletd
+#   are never touched by that process. Set BOOTSTRAP_DOMAIN_NAME to also
+#   have this script front $BOOTSTRAP_OUTPUT_DIR with nginx + a real
+#   Let's Encrypt cert.
 
 set -euo pipefail
 
@@ -219,6 +258,10 @@ TESTNODE_LWD_HTTP_BIND="${TESTNODE_LWD_HTTP_BIND:-127.0.0.1:9078}"
 TESTNODE_DOMAIN_NAME="${TESTNODE_DOMAIN_NAME:-}"
 TESTNODE_LWD_DOMAIN_NAME="${TESTNODE_LWD_DOMAIN_NAME:-}"
 TESTNODE_CERTBOT_EMAIL="${TESTNODE_CERTBOT_EMAIL:-$CERTBOT_EMAIL}"
+ENABLE_BOOTSTRAP_NODE="${ENABLE_BOOTSTRAP_NODE:-0}"
+BOOTSTRAP_RPC_PORT="${BOOTSTRAP_RPC_PORT:-45483}"
+BOOTSTRAP_LISTEN="${BOOTSTRAP_LISTEN:-0}"
+BOOTSTRAP_DOMAIN_NAME="${BOOTSTRAP_DOMAIN_NAME:-}"
 
 if [[ -n "$DOMAIN_NAME" || -n "$LWD_DOMAIN_NAME" ]]; then
   if [[ -z "$DOMAIN_NAME" || -z "$LWD_DOMAIN_NAME" ]]; then
@@ -245,6 +288,17 @@ if [[ "$ENABLE_TESTNODE" == "1" ]]; then
   fi
   if [[ -z "$TESTNODE_CERTBOT_EMAIL" ]]; then
     echo "ENABLE_TESTNODE=1 requires CERTBOT_EMAIL or TESTNODE_CERTBOT_EMAIL, so Let's Encrypt can reach you about renewal problems." >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$BOOTSTRAP_DOMAIN_NAME" ]]; then
+  if [[ "$ENABLE_BOOTSTRAP_NODE" != "1" ]]; then
+    echo "BOOTSTRAP_DOMAIN_NAME requires ENABLE_BOOTSTRAP_NODE=1 - no point provisioning a domain for a snapshot directory nothing ever populates." >&2
+    exit 1
+  fi
+  if [[ -z "$CERTBOT_EMAIL" ]]; then
+    echo "BOOTSTRAP_DOMAIN_NAME is set but CERTBOT_EMAIL is not. Set CERTBOT_EMAIL so Let's Encrypt can reach you about renewal problems." >&2
     exit 1
   fi
 fi
@@ -280,6 +334,10 @@ TESTNODE_LWD_DATA_DIR="$DATA_DIR/lightwalletd-test"
 # and it would never successfully authenticate to its own pirated.
 TESTNODE_CONF="$TESTNODE_PIRATED_DATA_DIR/PIRATE.conf"
 
+BOOTSTRAP_PIRATED_DATA_DIR="$DATA_DIR/pirated-bootstrap"
+BOOTSTRAP_CONF="$BOOTSTRAP_PIRATED_DATA_DIR/PIRATE.conf"
+BOOTSTRAP_OUTPUT_DIR="${BOOTSTRAP_OUTPUT_DIR:-$INSTALL_DIR/bootstrap-www}"
+
 BITCORE_NODE_JSON="$BITCORE_NODE_DIR/bitcore-node.json"
 TESTNODE_BITCORE_NODE_JSON="$TESTNODE_BITCORE_NODE_DIR/bitcore-node.json"
 ECOSYSTEM_FILE="$CONFIG_DIR/ecosystem.config.js"
@@ -296,7 +354,7 @@ apt-get install -y \
   libcurl4-gnutls-dev bsdmainutils curl libsodium-dev bison liblz4-dev zip \
   golang-go jq openssl
 
-if [[ -n "$DOMAIN_NAME" || -n "$TESTNODE_DOMAIN_NAME" ]]; then
+if [[ -n "$DOMAIN_NAME" || -n "$TESTNODE_DOMAIN_NAME" || -n "$BOOTSTRAP_DOMAIN_NAME" ]]; then
   apt-get install -y nginx certbot python3-certbot-nginx
 fi
 
@@ -351,6 +409,12 @@ as_user "mkdir -p '$BUILD_DIR' '$BIN_DIR' '$CONFIG_DIR' '$PIRATED_DATA_DIR' '$LW
 if [[ "$ENABLE_TESTNODE" == "1" ]]; then
   as_user "mkdir -p '$TESTNODE_PIRATED_DATA_DIR' '$TESTNODE_LWD_DATA_DIR'"
 fi
+if [[ "$ENABLE_BOOTSTRAP_NODE" == "1" ]]; then
+  as_user "mkdir -p '$BOOTSTRAP_PIRATED_DATA_DIR'"
+  if [[ -n "$BOOTSTRAP_DOMAIN_NAME" ]]; then
+    as_user "mkdir -p '$BOOTSTRAP_OUTPUT_DIR'"
+  fi
+fi
 # $BITCORE_NODE_DIR/$TESTNODE_BITCORE_NODE_DIR are intentionally not created
 # here - `bitcore-node create` below refuses to run if its target directory
 # already exists.
@@ -361,7 +425,13 @@ if [[ -n "$DNSSEED_HOST" ]]; then
   open_firewall_port "$DNSSEED_PORT/udp"
 fi
 
-if [[ -n "$DOMAIN_NAME" || -n "$TESTNODE_DOMAIN_NAME" ]]; then
+# BOOTSTRAP_LISTEN=1 uses this same $P2P_PORT (Pirate's real P2P port is
+# asset-chain-derived, not independently settable per instance - see
+# P2P_PORT above), already opened unconditionally right above; nothing
+# further to open here, just note two listening mainnet instances on the
+# same host WILL conflict binding it.
+
+if [[ -n "$DOMAIN_NAME" || -n "$TESTNODE_DOMAIN_NAME" || -n "$BOOTSTRAP_DOMAIN_NAME" ]]; then
   open_firewall_port 80/tcp
   open_firewall_port 443/tcp
   # bitcore-node's web service always binds all interfaces (no host option),
@@ -391,6 +461,7 @@ if [[ -n "$DOMAIN_NAME" || -n "$TESTNODE_DOMAIN_NAME" ]]; then
   ALL_HOSTNAMES=""
   [[ -n "$DOMAIN_NAME" ]] && ALL_HOSTNAMES="$ALL_HOSTNAMES $DOMAIN_NAME $LWD_DOMAIN_NAME"
   [[ -n "$TESTNODE_DOMAIN_NAME" ]] && ALL_HOSTNAMES="$ALL_HOSTNAMES $TESTNODE_DOMAIN_NAME $TESTNODE_LWD_DOMAIN_NAME"
+  [[ -n "$BOOTSTRAP_DOMAIN_NAME" ]] && ALL_HOSTNAMES="$ALL_HOSTNAMES $BOOTSTRAP_DOMAIN_NAME"
   ALL_HOSTNAMES="${ALL_HOSTNAMES# }"
 
   log "Writing initial nginx config for$ALL_HOSTNAMES (HTTP only, for the ACME challenge)"
@@ -443,6 +514,22 @@ EOF
     else
       log "Certificate covering $TESTNODE_DOMAIN_NAME/$TESTNODE_LWD_DOMAIN_NAME already exists, skipping issuance"
     fi
+  fi
+  if [[ -n "$BOOTSTRAP_DOMAIN_NAME" ]]; then
+    BOOTSTRAP_CERT_DIR="/etc/letsencrypt/live/$BOOTSTRAP_DOMAIN_NAME"
+    if [[ ! -f "$BOOTSTRAP_CERT_DIR/fullchain.pem" ]]; then
+      log "Obtaining Let's Encrypt certificate for $BOOTSTRAP_DOMAIN_NAME"
+      certbot certonly --webroot -w "$WEBROOT_DIR" -d "$BOOTSTRAP_DOMAIN_NAME" \
+        --non-interactive --agree-tos -m "$CERTBOT_EMAIL"
+    else
+      log "Certificate covering $BOOTSTRAP_DOMAIN_NAME already exists, skipping issuance"
+    fi
+
+    # nginx (typically www-data) needs traversal permission on every
+    # directory in the path down to $BOOTSTRAP_OUTPUT_DIR, which otherwise
+    # sits under $TARGET_USER's home dir - home directories commonly default
+    # to not being world-traversable.
+    chmod o+rx "$TARGET_HOME" "$INSTALL_DIR" "$BOOTSTRAP_OUTPUT_DIR"
   fi
 
   LIVE_TLS_BLOCKS=""
@@ -523,6 +610,27 @@ EOF
 )
   fi
 
+  BOOTSTRAP_TLS_BLOCKS=""
+  if [[ -n "$BOOTSTRAP_DOMAIN_NAME" ]]; then
+    BOOTSTRAP_TLS_BLOCKS=$(cat <<EOF
+
+# Bootstrap-source node: serves \$BOOTSTRAP_OUTPUT_DIR (tarball + sha256),
+# refreshed by pirate-scripts/bootstrap-snapshot.sh
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $BOOTSTRAP_DOMAIN_NAME;
+
+    ssl_certificate     $BOOTSTRAP_CERT_DIR/fullchain.pem;
+    ssl_certificate_key $BOOTSTRAP_CERT_DIR/privkey.pem;
+
+    root $BOOTSTRAP_OUTPUT_DIR;
+    autoindex off;
+}
+EOF
+)
+  fi
+
   log "Writing final nginx config (TLS termination + reverse proxy)"
   cat > "$NGINX_SITE" <<EOF
 server {
@@ -540,6 +648,7 @@ server {
 }
 $LIVE_TLS_BLOCKS
 $TEST_TLS_BLOCKS
+$BOOTSTRAP_TLS_BLOCKS
 EOF
   nginx -t
   systemctl reload nginx
@@ -715,6 +824,33 @@ EOF"
   as_user "chmod +x '$BIN_DIR/pirated-testnode'"
 fi
 
+if [[ "$ENABLE_BOOTSTRAP_NODE" == "1" ]]; then
+  log "Configuring the bootstrap-source node's pirated ($BOOTSTRAP_CONF)"
+  if [[ ! -f "$BOOTSTRAP_CONF" ]]; then
+    BOOTSTRAP_RPC_USER="pirate_$(openssl rand -hex 6)"
+    BOOTSTRAP_RPC_PASSWORD=$(openssl rand -hex 24)
+    as_user "cat > '$BOOTSTRAP_CONF' <<EOF
+server=1
+listen=$BOOTSTRAP_LISTEN
+maxconnections=256
+rpcuser=$BOOTSTRAP_RPC_USER
+rpcpassword=$BOOTSTRAP_RPC_PASSWORD
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=$BOOTSTRAP_RPC_PORT
+rpcworkqueue=128
+torautostart=0
+i2pdautostart=0
+# addressindex/timestampindex/spentindex intentionally left at their
+# defaults (off) - nothing but bootstrap-snapshot.sh and the P2P network
+# query this instance. Note txindex is unconditionally on regardless of
+# this file's contents in this fork (see src/main.cpp's fTxIndex).
+EOF"
+  else
+    log "$BOOTSTRAP_CONF already exists, leaving credentials untouched"
+  fi
+fi
+
 log "Scaffolding bitcore-node instance directory"
 if [[ ! -f "$BITCORE_NODE_JSON" ]]; then
   CREATE_NETWORK_FLAG=""
@@ -849,6 +985,20 @@ if [[ -n "$DNSSEED_HOST" ]]; then
     }"
 fi
 
+BOOTSTRAP_APP_JS=""
+if [[ "$ENABLE_BOOTSTRAP_NODE" == "1" ]]; then
+  BOOTSTRAP_APP_JS=",
+    {
+      name: 'bootstrap-node',
+      cwd: '$BOOTSTRAP_PIRATED_DATA_DIR',
+      script: '$BIN_DIR/pirated',
+      args: '-conf=$BOOTSTRAP_CONF -datadir=$BOOTSTRAP_PIRATED_DATA_DIR',
+      autorestart: true,
+      max_restarts: 30,
+      restart_delay: 5000
+    }"
+fi
+
 as_user "cat > '$ECOSYSTEM_FILE' <<EOF
 module.exports = {
   apps: [
@@ -870,7 +1020,7 @@ module.exports = {
       autorestart: true,
       max_restarts: 30,
       restart_delay: 5000
-    }$TESTNODE_APPS_JS$DNSSEED_APP_JS
+    }$TESTNODE_APPS_JS$DNSSEED_APP_JS$BOOTSTRAP_APP_JS
   ]
 };
 EOF"
@@ -918,6 +1068,24 @@ fi
 if [[ -n "$DNSSEED_HOST" ]]; then
   log "Starting pirate-seeder under pm2"
   as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only pirate-seeder"
+fi
+
+if [[ "$ENABLE_BOOTSTRAP_NODE" == "1" ]]; then
+  log "Starting bootstrap-node under pm2 and waiting for its pirated RPC to come up"
+  as_user "$NVM_LOAD; pm2 start '$ECOSYSTEM_FILE' --only bootstrap-node"
+
+  BOOTSTRAP_RPC_READY=0
+  for _ in $(seq 1 60); do
+    if as_user "'$BIN_DIR/pirate-cli' -conf='$BOOTSTRAP_CONF' -datadir='$BOOTSTRAP_PIRATED_DATA_DIR' getinfo" >/dev/null 2>&1; then
+      BOOTSTRAP_RPC_READY=1
+      break
+    fi
+    sleep 5
+  done
+
+  if [[ "$BOOTSTRAP_RPC_READY" -ne 1 ]]; then
+    echo "WARNING: bootstrap-source node's pirated RPC did not respond within 5 minutes. pm2 will keep retrying it." >&2
+  fi
 fi
 
 log "Persisting pm2 process list and enabling pm2 on boot"
@@ -992,6 +1160,23 @@ else
   pirate-seeder/README.md)."
 fi
 
+if [[ "$ENABLE_BOOTSTRAP_NODE" == "1" ]]; then
+  BOOTSTRAP_INFO="
+  Bootstrap-source node: pm2 process \"bootstrap-node\" (RPC on 127.0.0.1:$BOOTSTRAP_RPC_PORT)
+    Conf/data: $BOOTSTRAP_CONF, $BOOTSTRAP_PIRATED_DATA_DIR
+    Default indexes, embedded Tor/I2P disabled, listen=$BOOTSTRAP_LISTEN.
+    Independent of the live node/bitcore/lightwalletd - run
+    pirate-scripts/bootstrap-snapshot.sh (its own --install-timer sets up a
+    daily systemd timer) to stop/tar/restart this instance and publish
+    \$BOOTSTRAP_OUTPUT_DIR ($BOOTSTRAP_OUTPUT_DIR).$([ -n "$BOOTSTRAP_DOMAIN_NAME" ] && echo "
+    Served at: https://$BOOTSTRAP_DOMAIN_NAME/")"
+else
+  BOOTSTRAP_INFO="
+  Bootstrap-source node: not running. Set ENABLE_BOOTSTRAP_NODE=1 (and
+  optionally BOOTSTRAP_DOMAIN_NAME/CERTBOT_EMAIL to serve it over HTTPS)
+  and re-run this script to add one."
+fi
+
 cat <<SUMMARY
 
 ==> Deploy complete.
@@ -1002,14 +1187,16 @@ cat <<SUMMARY
 $ACCESS_INFO
 $TESTNODE_INFO
 $DNSSEED_INFO
+$BOOTSTRAP_INFO
 
   Layout (all owned by $TARGET_USER, no sudo needed for day-to-day use):
     $BUILD_DIR        TreasureChest/lightwalletd/pirate-seeder source + compiled binaries - pull/rebuild here to update
     $BIN_DIR          stable symlinks that config/pm2 point at (and pirated-testnode, if ENABLE_TESTNODE=1)
     $BITCORE_NODE_DIR bitcore-node.json + node_modules (bitcore-node-pirate, insight-api-pirate, insight-ui-pirate)
     $TESTNODE_BITCORE_NODE_DIR  same, for the test node (if ENABLE_TESTNODE=1)
-    $DATA_DIR         chain data, PIRATE.conf, lightwalletd cache, dnsseed.dat, and the test node's own data/conf - back this up
+    $DATA_DIR         chain data, PIRATE.conf, lightwalletd cache, dnsseed.dat, the test node's own data/conf, and the bootstrap-source node's data/conf - back this up
     $CONFIG_DIR       pm2 ecosystem.config.js
+    $BOOTSTRAP_OUTPUT_DIR  bootstrap-snapshot.sh's published tarball + sha256 (if ENABLE_BOOTSTRAP_NODE=1) - regenerable, no need to back up
 
   RPC credentials: $PIRATE_CONF (generated on first run, not printed here)
 
@@ -1020,11 +1207,13 @@ $DNSSEED_INFO
     pm2 logs bitcore-test
     pm2 logs lightwalletd-test
     pm2 logs pirate-seeder
+    pm2 logs bootstrap-node
 
   To update pirated/lightwalletd/pirate-seeder: pull + rebuild in $BUILD_DIR,
   then 'pm2 restart bitcore lightwalletd bitcore-test lightwalletd-test
-  pirate-seeder' (the $BIN_DIR symlinks pick up the new binaries automatically
-  - no config changes needed; pirated-testnode wraps the same symlink). If
+  pirate-seeder bootstrap-node' (the $BIN_DIR symlinks pick up the new
+  binaries automatically - no config changes needed; pirated-testnode wraps
+  the same symlink). If
   DNSSEED_PORT is below 1024, re-run this script instead of restarting
   manually after rebuilding pirate-seeder - the CAP_NET_BIND_SERVICE grant is
   lost every time the binary is replaced and this script is what re-applies it.
