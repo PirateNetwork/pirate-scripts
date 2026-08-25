@@ -40,9 +40,9 @@
 #   NODE_VERSION            Node.js version already installed via nvm (default: 24.19.0)
 #   BOOTSTRAP_OUTPUT_DIR    Where the tarball + sha256 are published (default: $INSTALL_DIR/bootstrap-www)
 #   BOOTSTRAP_NAME          Base filename, without extension (default: ARRR-bootstrap)
-#   BOOTSTRAP_KEEP          How many dated snapshots to retain for manual rollback, besides the published copy (default: 3)
-#   BOOTSTRAP_STOP_TIMEOUT  Seconds to wait for the bootstrap-source node to shut down cleanly before giving up (default: 120)
-#   BOOTSTRAP_START_TIMEOUT Seconds to wait for its RPC to come back up after restart (default: 300)
+#   BOOTSTRAP_KEEP          How many dated snapshots to retain for manual rollback, besides the published copy (default: 0)
+#   BOOTSTRAP_STOP_TIMEOUT  Seconds to wait for the bootstrap-source node to shut down cleanly before giving up (default: 600)
+#   BOOTSTRAP_START_TIMEOUT Seconds to wait for its RPC to come back up after restart (default: 600)
 
 set -euo pipefail
 
@@ -58,9 +58,9 @@ INSTALL_DIR="${INSTALL_DIR:-$TARGET_HOME/pirateseednode}"
 NODE_VERSION="${NODE_VERSION:-24.19.0}"
 BOOTSTRAP_OUTPUT_DIR="${BOOTSTRAP_OUTPUT_DIR:-$INSTALL_DIR/bootstrap-www}"
 BOOTSTRAP_NAME="${BOOTSTRAP_NAME:-ARRR-bootstrap}"
-BOOTSTRAP_KEEP="${BOOTSTRAP_KEEP:-3}"
-BOOTSTRAP_STOP_TIMEOUT="${BOOTSTRAP_STOP_TIMEOUT:-120}"
-BOOTSTRAP_START_TIMEOUT="${BOOTSTRAP_START_TIMEOUT:-300}"
+BOOTSTRAP_KEEP="${BOOTSTRAP_KEEP:-0}"
+BOOTSTRAP_STOP_TIMEOUT="${BOOTSTRAP_STOP_TIMEOUT:-600}"
+BOOTSTRAP_START_TIMEOUT="${BOOTSTRAP_START_TIMEOUT:-600}"
 
 BIN_DIR="$INSTALL_DIR/bin"
 DATA_DIR="$INSTALL_DIR/data"
