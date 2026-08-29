@@ -169,7 +169,10 @@ as_user "$NVM_LOAD; pm2 stop bootstrap-node" || true
 
 log "Building tarball from blocks/+chainstate/"
 STAGING_DIR="$BOOTSTRAP_OUTPUT_DIR/.tmp"
-as_user "mkdir -p '$STAGING_DIR'"
+# Wipe any debris left behind by a prior run that got interrupted between
+# staging and publishing (a kill, a failed mv, etc.) - .tmp/ is pure
+# scratch space, nothing here is ever meant to persist between runs.
+as_user "rm -rf '$STAGING_DIR' && mkdir -p '$STAGING_DIR'"
 TIMESTAMP="$(date -u +%Y%m%d)"
 STAGED_TARBALL="$STAGING_DIR/$BOOTSTRAP_NAME-$TIMESTAMP.tar.gz"
 as_user "tar -czf '$STAGED_TARBALL' -C '$BOOTSTRAP_PIRATED_DATA_DIR' blocks chainstate"
