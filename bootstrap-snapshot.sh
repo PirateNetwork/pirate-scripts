@@ -167,6 +167,24 @@ fi
 
 as_user "$NVM_LOAD; pm2 stop bootstrap-node" || true
 
+PUBLISHED_TARBALL="$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME-v2.tar.gz"
+PUBLISHED_HASH="$PUBLISHED_TARBALL.sha256"
+
+# Delete-then-create, not create-then-replace: on a disk too tight to hold
+# even one interim copy alongside the live blocks/+chainstate/ being
+# archived, the old published tarball's space has to be freed *before*
+# building the new one, not after. This does mean the bootstrap is
+# unavailable from this host for the few minutes it takes to rebuild -
+# acceptable given the alternative is running out of disk mid-tar. Clients
+# fall through to the other two sources during that window regardless.
+log "Freeing space: deleting the currently published bootstrap before building a new one"
+as_user "rm -f '$PUBLISHED_TARBALL' '$PUBLISHED_HASH'"
+if [[ "$BOOTSTRAP_KEEP" -eq 0 ]]; then
+  # Nothing wants these kept around either - same reasoning as above,
+  # don't hold their space hostage until the end-of-run prune step.
+  as_user "ls -1 '$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME'-[0-9]*.tar.gz 2>/dev/null | while read -r f; do rm -f \"\$f\" \"\$f.sha256\"; done"
+fi
+
 log "Building tarball from blocks/+chainstate/"
 STAGING_DIR="$BOOTSTRAP_OUTPUT_DIR/.tmp"
 # Wipe any debris left behind by a prior run that got interrupted between
@@ -181,17 +199,23 @@ log "Computing sha256"
 STAGED_HASH="$STAGED_TARBALL.sha256"
 as_user "sha256sum '$STAGED_TARBALL' | awk '{print \$1}' > '$STAGED_HASH'"
 
-log "Publishing (hardlink for the dated copy, atomic rename for the canonical name - both share the same disk blocks, no double the space used)"
-PUBLISHED_TARBALL="$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME-v2.tar.gz"
-PUBLISHED_HASH="$PUBLISHED_TARBALL.sha256"
-DATED_TARBALL="$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME-$TIMESTAMP.tar.gz"
-DATED_HASH="$DATED_TARBALL.sha256"
-as_user "ln -f '$STAGED_TARBALL' '$DATED_TARBALL'"
-as_user "ln -f '$STAGED_HASH' '$DATED_HASH'"
+log "Publishing"
+if [[ "$BOOTSTRAP_KEEP" -gt 0 ]]; then
+  # Hardlink for the dated copy, atomic rename for the canonical name -
+  # both share the same disk blocks, no double the space used. Skipped
+  # entirely when BOOTSTRAP_KEEP=0 (the default) - no point creating a
+  # dated copy just to prune it away again below.
+  DATED_TARBALL="$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME-$TIMESTAMP.tar.gz"
+  DATED_HASH="$DATED_TARBALL.sha256"
+  as_user "ln -f '$STAGED_TARBALL' '$DATED_TARBALL'"
+  as_user "ln -f '$STAGED_HASH' '$DATED_HASH'"
+fi
 as_user "mv -f '$STAGED_TARBALL' '$PUBLISHED_TARBALL'"
 as_user "mv -f '$STAGED_HASH' '$PUBLISHED_HASH'"
 
-log "Pruning dated snapshots beyond BOOTSTRAP_KEEP=$BOOTSTRAP_KEEP"
-as_user "ls -1t '$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME'-[0-9]*.tar.gz 2>/dev/null | tail -n +\$(($BOOTSTRAP_KEEP + 1)) | while read -r f; do rm -f \"\$f\" \"\$f.sha256\"; done"
+if [[ "$BOOTSTRAP_KEEP" -gt 0 ]]; then
+  log "Pruning dated snapshots beyond BOOTSTRAP_KEEP=$BOOTSTRAP_KEEP"
+  as_user "ls -1t '$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME'-[0-9]*.tar.gz 2>/dev/null | tail -n +\$(($BOOTSTRAP_KEEP + 1)) | while read -r f; do rm -f \"\$f\" \"\$f.sha256\"; done"
+fi
 
 log "Snapshot published to $PUBLISHED_TARBALL - bootstrap-node restart happens via the exit trap"
