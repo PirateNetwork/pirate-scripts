@@ -128,7 +128,7 @@
 #                     instance whose only job is holding synced chain data
 #                     for a bootstrap-snapshot.sh timer to tar up - see
 #                     "Bootstrap-source node" below. Decoupled from the live
-#                     node/bitcore/lightwalletd so a daily snapshot never
+#                     node/bitcore/lightwalletd so a weekly snapshot never
 #                     causes production downtime.
 #   BOOTSTRAP_RPC_PORT Bootstrap-source node's pirated RPC port (default:
 #                     45483)
@@ -198,7 +198,7 @@
 #   bootstrap-snapshot.sh and the P2P network it syncs from), embedded Tor/
 #   I2P disabled (torautostart=0, i2pdautostart=0), outbound-only by default
 #   (listen=0, see BOOTSTRAP_LISTEN above). Run pirate-scripts/
-#   bootstrap-snapshot.sh (separately, e.g. on a daily systemd timer via
+#   bootstrap-snapshot.sh (separately, e.g. on a weekly systemd timer via
 #   its own --install-timer) to stop/tar/restart this instance and publish
 #   a fresh blocks+chainstate tarball - the live node/bitcore/lightwalletd
 #   are never touched by that process. Set BOOTSTRAP_DOMAIN_NAME to also
@@ -1167,7 +1167,7 @@ if [[ "$ENABLE_BOOTSTRAP_NODE" == "1" ]]; then
     Default indexes, embedded Tor/I2P disabled, listen=$BOOTSTRAP_LISTEN.
     Independent of the live node/bitcore/lightwalletd - run
     pirate-scripts/bootstrap-snapshot.sh (its own --install-timer sets up a
-    daily systemd timer) to stop/tar/restart this instance and publish
+    weekly systemd timer) to stop/tar/restart this instance and publish
     \$BOOTSTRAP_OUTPUT_DIR ($BOOTSTRAP_OUTPUT_DIR).$([ -n "$BOOTSTRAP_DOMAIN_NAME" ] && echo "
     Served at: https://$BOOTSTRAP_DOMAIN_NAME/")"
 else

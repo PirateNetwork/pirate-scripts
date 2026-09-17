@@ -22,8 +22,10 @@ of overridable environment variables.
   instance for the copy (LevelDB isn't safe to copy hot) and always
   restarts it afterward, even on failure - the live node, bitcore,
   lightwalletd, and pirate-seeder are never touched. Run
-  `sudo ./bootstrap-snapshot.sh --install-timer` once to set up a daily
-  systemd timer instead of running it by hand.
+  `sudo ./bootstrap-snapshot.sh --install-timer` once to set up a weekly
+  systemd timer instead of running it by hand. Also restarts nginx after
+  deleting the old tarball, since Linux won't actually release a deleted
+  file's disk space while nginx still has it open serving a download.
 
 For a seed node to actually contribute fresh bootstrap tarballs, deploy it
 with `ENABLE_BOOTSTRAP_NODE=1` and (to serve it publicly)

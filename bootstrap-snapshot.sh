@@ -27,12 +27,16 @@
 #
 # Usage:
 #   sudo ./bootstrap-snapshot.sh                  run one snapshot now
-#   sudo ./bootstrap-snapshot.sh --install-timer   install+enable a daily
+#   sudo ./bootstrap-snapshot.sh --install-timer   install+enable a weekly
 #                                                   systemd timer that runs
 #                                                   this script (OnCalendar=
-#                                                   daily, RandomizedDelaySec=
+#                                                   weekly, RandomizedDelaySec=
 #                                                   1h so multiple seed nodes
-#                                                   don't all pause at once)
+#                                                   don't all pause at once) -
+#                                                   kept infrequent since each
+#                                                   run briefly interrupts
+#                                                   nginx (see below) and the
+#                                                   bootstrap-source node
 #
 # Overridable via environment variables (same meaning/defaults as
 # deploy-seed-node.sh where shared):
@@ -92,10 +96,10 @@ EOF
 
   cat > /etc/systemd/system/pirate-bootstrap-snapshot.timer <<EOF
 [Unit]
-Description=Daily Pirate bootstrap tarball refresh
+Description=Weekly Pirate bootstrap tarball refresh
 
 [Timer]
-OnCalendar=daily
+OnCalendar=weekly
 RandomizedDelaySec=1h
 Persistent=true
 
@@ -183,6 +187,19 @@ if [[ "$BOOTSTRAP_KEEP" -eq 0 ]]; then
   # Nothing wants these kept around either - same reasoning as above,
   # don't hold their space hostage until the end-of-run prune step.
   as_user "ls -1 '$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME'-[0-9]*.tar.gz 2>/dev/null | while read -r f; do rm -f \"\$f\" \"\$f.sha256\"; done"
+fi
+
+# unlink() above only removes the directory entry - the actual disk blocks
+# stay allocated as long as any process still holds the file open, e.g.
+# nginx mid-download for a client. Without this, the "freed" space never
+# actually becomes available and the new tarball can run out of room and
+# come out corrupted/truncated. A reload drains in-flight requests
+# gracefully (keeping old workers, and their open fds, alive until each
+# finishes) - only a hard restart closes them now. This does interrupt any
+# in-flight download, which is an accepted tradeoff here.
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  log "Restarting nginx to force-release the deleted bootstrap's disk space"
+  systemctl restart nginx
 fi
 
 log "Building tarball from blocks/+chainstate/"
