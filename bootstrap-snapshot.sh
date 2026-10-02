@@ -6,11 +6,13 @@
 #
 # What it does, in order:
 #   1. Records the bootstrap-source node's current height for logging.
-#   2. Cleanly stops it (`pirate-cli stop`, then waits for the process to
-#      actually exit) and stops its pm2 app so autorestart doesn't race the
-#      copy - LevelDB's background compaction thread isn't gated by any
-#      in-process lock, so this is the only way to guarantee blocks/+
-#      chainstate/ aren't mid-write during the tar.
+#   2. Stops its pm2 app first (disarms autorestart), then cleanly stops the
+#      daemon itself (`pirate-cli stop`, then waits for the process to
+#      actually exit) - in that order, so there's never a window where pm2
+#      could respawn a fresh pirated against the same datadir while this
+#      script is still copying it. LevelDB's background compaction thread
+#      isn't gated by any in-process lock, so this is the only way to
+#      guarantee blocks/+chainstate/ aren't mid-write during the tar.
 #   3. Tars just blocks/+chainstate/ (not the whole datadir - no wallet.dat,
 #      conf, or onion/i2p keys) and computes its sha256.
 #   4. Atomically publishes both into BOOTSTRAP_OUTPUT_DIR under the same
@@ -151,6 +153,25 @@ trap restart_bootstrap_node EXIT
 log "Recording current height before stopping"
 as_user "$PIRATE_CLI getblockcount" 2>/dev/null || echo "(RPC not responding - node may already be down)"
 
+# pm2 stop *before* the RPC stop, not after: pm2's ecosystem config has
+# autorestart:true (so a crash is self-healing in normal operation), and
+# `pirate-cli stop` makes the daemon exit on its own. If pm2 were told to
+# stop only after we'd confirmed the process was gone, there'd be a window
+# - between the old process exiting and us calling `pm2 stop` - where pm2
+# sees an unexpected exit and immediately respawns a fresh pirated against
+# the same datadir, which then opens LevelDB and starts writing to
+# blocks/+chainstate/ while this script is busy tarring them up. That's
+# exactly the kind of mid-write snapshot that produces a blk*.dat-vs-index
+# mismatch for every client who later bootstraps from it. Marking the pm2
+# app "stopped" first disarms autorestart before the daemon is ever told to
+# exit, so there's no respawn window at all. pm2's own kill signal (sent as
+# part of `pm2 stop`) is harmless here too: kill_timeout is set generously
+# in deploy-seed-node.sh's ecosystem config so pm2 won't SIGKILL the daemon
+# mid-flush before the graceful `pirate-cli stop` below (or pm2's own
+# SIGINT) has had time to finish.
+log "Stopping bootstrap-node's pm2 app (disarms autorestart before touching the process)"
+as_user "$NVM_LOAD; pm2 stop bootstrap-node" || true
+
 log "Stopping bootstrap-node cleanly"
 as_user "$PIRATE_CLI stop" >/dev/null 2>&1 || true
 
@@ -168,8 +189,6 @@ if [[ "$STOPPED" -ne 1 ]]; then
   echo "bootstrap-source node did not stop within ${BOOTSTRAP_STOP_TIMEOUT}s - aborting this snapshot without touching blocks/chainstate." >&2
   exit 1
 fi
-
-as_user "$NVM_LOAD; pm2 stop bootstrap-node" || true
 
 PUBLISHED_TARBALL="$BOOTSTRAP_OUTPUT_DIR/$BOOTSTRAP_NAME-v2.tar.gz"
 PUBLISHED_HASH="$PUBLISHED_TARBALL.sha256"

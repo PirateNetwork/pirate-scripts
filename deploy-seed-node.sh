@@ -995,7 +995,12 @@ if [[ "$ENABLE_BOOTSTRAP_NODE" == "1" ]]; then
       args: '-conf=$BOOTSTRAP_CONF -datadir=$BOOTSTRAP_PIRATED_DATA_DIR',
       autorestart: true,
       max_restarts: 30,
-      restart_delay: 5000
+      restart_delay: 5000,
+      // Generous on purpose: bootstrap-snapshot.sh stops this app (pm2's
+      // own kill signal) before also issuing a graceful pirate-cli stop.
+      // kill_timeout has to outlast a full chainstate flush, or pm2 SIGKILLs
+      // the daemon mid-shutdown before that graceful stop can finish.
+      kill_timeout: 600000
     }"
 fi
 
