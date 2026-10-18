@@ -43,6 +43,7 @@ fi
 
 TARGET_USER="${SUDO_USER:-root}"
 TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+TARGET_GROUP=$(id -gn "$TARGET_USER")
 
 INSTALL_DIR="${INSTALL_DIR:-$TARGET_HOME/pirateseednode}"
 DATA_DIR="$INSTALL_DIR/data"
@@ -65,7 +66,13 @@ if [[ -z "${ENABLE_TESTNODE:-}" ]]; then
 fi
 
 log "Installing /etc/logrotate.d/pirate-lightwalletd"
-LWD_LOGROTATE_STANZA="$LWD_DATA_DIR/server.log {
+# su is required, not cosmetic: $LWD_DATA_DIR is owned/writable by
+# $TARGET_USER (pirated/lightwalletd run as that user, not root), so
+# logrotate - invoked as root via cron - refuses to touch anything under it
+# as an insecure-permissions safety check unless told whose UID/GID to
+# assume for the actual rotation.
+LWD_LOGROTATE_STANZA="su $TARGET_USER $TARGET_GROUP
+$LWD_DATA_DIR/server.log {
   size 100M
   rotate 5
   compress

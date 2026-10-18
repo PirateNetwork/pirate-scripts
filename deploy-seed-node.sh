@@ -213,6 +213,7 @@ fi
 
 TARGET_USER="${SUDO_USER:-root}"
 TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+TARGET_GROUP=$(id -gn "$TARGET_USER")
 
 INSTALL_DIR="${INSTALL_DIR:-$TARGET_HOME/pirateseednode}"
 NODE_VERSION="${NODE_VERSION:-24.19.0}"
@@ -1038,7 +1039,13 @@ EOF"
 # lightwalletd already has open, in place, so it keeps writing to the same
 # path from offset 0.
 log "Installing logrotate config for lightwalletd's own log file(s)"
-LWD_LOGROTATE_STANZA="$LWD_DATA_DIR/server.log {
+# su is required, not cosmetic: $LWD_DATA_DIR is owned/writable by
+# $TARGET_USER (pirated/lightwalletd run as that user, not root), so
+# logrotate - invoked as root via cron - refuses to touch anything under it
+# as an insecure-permissions safety check unless told whose UID/GID to
+# assume for the actual rotation.
+LWD_LOGROTATE_STANZA="su $TARGET_USER $TARGET_GROUP
+$LWD_DATA_DIR/server.log {
   size 100M
   rotate 5
   compress
